@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  push_to_registries:
-    name: Push Docker image to multiple registries
+  push_to_ghcr:
+    name: Push Docker images to GHCR
     runs-on: ubuntu-latest
     environment: github-pages
     permissions:
@@ -15,10 +15,17 @@ jobs:
       contents: read
       attestations: write
       id-token: write
+    env:
+      REGISTRY: ghcr.io
 
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
+
+      - name: Prepare image namespace
+        run: echo "IMAGE_OWNER_LC=${IMAGE_OWNER,,}" >> "$GITHUB_ENV"
+        env:
+          IMAGE_OWNER: ${{ github.repository_owner }}
 
       - name: Get latest release tag
         id: get_latest_release
@@ -37,16 +44,10 @@ jobs:
             }
           result-encoding: string
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_PASSWORD }}
-
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
@@ -58,8 +59,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            codewithcj/sparkyfitness
-            ghcr.io/${{ github.repository }}-frontend
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER_LC }}/sparkyfitness-frontend
           tags: |
             type=raw,value=${{ steps.get_latest_release.outputs.tag }}
             type=raw,value=latest
@@ -78,7 +78,7 @@ jobs:
       - name: Generate artifact attestation Frontend
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ghcr.io/${{ github.repository }}-frontend
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER_LC }}/sparkyfitness-frontend
           subject-digest: ${{ steps.push-frontend.outputs.digest }}
           push-to-registry: true
 
@@ -87,8 +87,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            codewithcj/sparkyfitness_server
-            ghcr.io/${{ github.repository }}-server
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER_LC }}/sparkyfitness-server
           tags: |
             type=raw,value=${{ steps.get_latest_release.outputs.tag }}
             type=raw,value=latest
@@ -107,7 +106,7 @@ jobs:
       - name: Generate artifact attestation server
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ghcr.io/${{ github.repository }}-server
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER_LC }}/sparkyfitness-server
           subject-digest: ${{ steps.push-server.outputs.digest }}
           push-to-registry: true
 
@@ -116,8 +115,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            codewithcj/sparkyfitness_garmin
-            ghcr.io/${{ github.repository }}-garmin
+            ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER_LC }}/sparkyfitness-garmin
           tags: |
             type=raw,value=${{ steps.get_latest_release.outputs.tag }}
             type=raw,value=latest
@@ -136,6 +134,6 @@ jobs:
       - name: Generate artifact attestation Garmin Microservice
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ghcr.io/${{ github.repository }}-garmin
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER_LC }}/sparkyfitness-garmin
           subject-digest: ${{ steps.push-garmin.outputs.digest }}
           push-to-registry: true

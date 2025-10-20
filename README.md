@@ -160,7 +160,10 @@ The following features are currently in beta and may not have been thoroughly te
 *   Family & Friends access
 *   Apple Health Data integration
 
+### Kubernetes Frontend Rollout
+
+- The unprivileged NGINX image now listens on container port `8080`. Update any Kubernetes `Deployment` manifests so the frontend container exposes `containerPort: 8080`, and adjust Services to use `targetPort: 8080`.
+- After the GitHub Action publishes a new image (`ghcr.io/<org>/sparky-frontend-unpriv:<sha>`), roll it out with your preferred GitOps or deployment workflow; no local rebuild is required.
+
 This application is under heavy development. Things may not work as expected due to the Supabase to PostgreSQL migration. BREAKING CHANGES might be introduced until the application is stable.
 You might need to change Docker/environment variables for new releases. Therefore, auto-upgrades using Watchtower or similar apps are not recommended. Read release notes for any BREAKING CHANGES.
-
-

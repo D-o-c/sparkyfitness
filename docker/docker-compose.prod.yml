@@ -50,7 +50,7 @@ services:
   sparkyfitness-frontend:
     image: codewithcj/sparkyfitness:latest # Use pre-built image
     ports:
-      - "3004:80" # Map host port 8080 to container port 80 (Nginx)
+      - "3004:8080" # Map host port 3004 to container port 8080 (Nginx)
     networks:
       - sparkyfitness-network # Use the new named network
     restart: always

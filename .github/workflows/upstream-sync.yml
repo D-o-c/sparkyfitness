@@ -1,0 +1,76 @@
+name: upstream-sync
+
+on:
+  schedule:
+    - cron: "0 5 * * *" # daily at 05:00 UTC
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      UPSTREAM_REPO: CodeWithCJ/SparkyFitness
+      UPSTREAM_BRANCH: main
+      TARGET_BRANCH: main
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Ensure upstream remote
+        run: |
+          git remote add upstream https://github.com/${UPSTREAM_REPO}.git 2>/dev/null || true
+          git fetch upstream ${UPSTREAM_BRANCH}
+
+      - name: Detect upstream changes
+        id: diff
+        run: |
+          git fetch origin ${TARGET_BRANCH}
+          if git diff --quiet origin/${TARGET_BRANCH} upstream/${UPSTREAM_BRANCH}; then
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create sync branch
+        if: steps.diff.outputs.has_changes == 'true'
+        run: |
+          git checkout -B upstream-sync origin/${TARGET_BRANCH}
+          git merge --no-edit upstream/${UPSTREAM_BRANCH}
+
+      - name: Push sync branch
+        if: steps.diff.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: git push origin upstream-sync --force
+
+      - name: Create or update pull request
+        if: steps.diff.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh pr view --head upstream-sync >/dev/null 2>&1; then
+            gh pr edit upstream-sync \
+              --title "Sync with upstream $(date -u +%Y-%m-%d)" \
+              --body "Automated daily sync with ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}."
+          else
+            gh pr create \
+              --base ${TARGET_BRANCH} \
+              --head upstream-sync \
+              --title "Sync with upstream $(date -u +%Y-%m-%d)" \
+              --body "Automated daily sync with ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}." \
+              --label "automation" \
+              --label "upstream"
+          fi
+
+      - name: Nothing to sync
+        if: steps.diff.outputs.has_changes != 'true'
+        run: echo "Upstream is already in sync." >> "$GITHUB_STEP_SUMMARY"
