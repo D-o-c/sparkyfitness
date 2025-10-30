@@ -5,8 +5,9 @@ import { Label } from "@/components/ui/label";
 import { toast } from "@/hooks/use-toast";
 import { apiCall } from '@/services/api';
 import { useAuth } from "@/hooks/useAuth";
+import TooltipWarning from './TooltipWarning';
 
-const GarminConnectSettings: React.FC = () => {
+const GarminConnectSettings: React.FC<{ onStatusChange: () => void }> = ({ onStatusChange }) => {
   const { user } = useAuth();
   const [garminEmail, setGarminEmail] = useState('');
   const [garminPassword, setGarminPassword] = useState('');
@@ -117,8 +118,9 @@ const GarminConnectSettings: React.FC = () => {
         });
         setShowGarminMfaInput(false);
         setGarminMfaCode('');
-        // After successful login, fetch status to update UI
+        // After successful login, fetch status to update UI and notify parent
         fetchGarminStatus();
+        onStatusChange();
       }
     } catch (error: any) {
       console.error('Login Error:', error);
@@ -155,8 +157,9 @@ const GarminConnectSettings: React.FC = () => {
         });
         setShowGarminMfaInput(false);
         setGarminMfaCode('');
-        // After successful MFA, fetch status to update UI
+        // After successful MFA, fetch status to update UI and notify parent
         fetchGarminStatus();
+        onStatusChange();
       }
     } catch (error: any) {
       console.error('MFA Error:', error);
@@ -195,6 +198,7 @@ const GarminConnectSettings: React.FC = () => {
       setGarminPassword('');
       setGarminMfaCode('');
       setShowGarminMfaInput(false);
+      onStatusChange(); // Notify parent component of status change
     } catch (error: any) {
       console.error('Failed to unlink Garmin:', error);
       toast({
@@ -248,9 +252,8 @@ const GarminConnectSettings: React.FC = () => {
 
   return (
     <div className="space-y-4">
-      <div className="bg-yellow-100 border-l-4 border-yellow-500 text-yellow-800 p-3 rounded">
-        <strong>Note:</strong> Garmin Connect integration is tested with few metrics only. Ensure your Docker Compose is updated to include Garmin section.
-      </div>
+  
+      <TooltipWarning warningMsg={"Garmin Connect integration is tested with few metrics only. Ensure your Docker Compose is updated to include Garmin section."} />
       <p className="text-sm text-muted-foreground">
         Sparky Fitness does not store your Garmin email or password. They are used only during login to obtain secure tokens.
       </p>
@@ -260,7 +263,7 @@ const GarminConnectSettings: React.FC = () => {
             <div>
               <Label htmlFor="garmin-email">Garmin Email</Label>
               <Input
-                id="garmin-email"
+                id="settings-garmin-email"
                 type="email"
                 placeholder="Enter your Garmin email"
                 value={garminEmail}
@@ -272,7 +275,7 @@ const GarminConnectSettings: React.FC = () => {
             <div>
               <Label htmlFor="garmin-password">Garmin Password</Label>
               <Input
-                id="garmin-password"
+                id="settings-garmin-password"
                 type="password"
                 placeholder="Enter your Garmin password"
                 value={garminPassword}
@@ -283,7 +286,7 @@ const GarminConnectSettings: React.FC = () => {
             </div>
           </div>
           <Button type="submit" disabled={loading}>
-            {loading ? 'Connecting...' : 'Connect to Garmin Connect'}
+            {loading ? 'Connecting...' : 'Connect Garmin'}
           </Button>
         </form>
       )}
@@ -292,7 +295,7 @@ const GarminConnectSettings: React.FC = () => {
         <>
           <Label htmlFor="garmin-mfa-code">Garmin MFA Code</Label>
           <Input
-            id="garmin-mfa-code"
+            id="settings-garmin-mfa-code"
             type="text"
             placeholder="Enter MFA code"
             value={garminMfaCode}
@@ -312,23 +315,6 @@ const GarminConnectSettings: React.FC = () => {
         <p className="text-sm">Last Synced Weight: {garminData.weight} kg</p>
       )}
 
-      {garminStatus.isLinked && (
-        <div className="space-y-2">
-          <p className="text-sm">Garmin Connect Status: <span className="font-semibold text-green-600">Linked</span></p>
-          {garminStatus.lastUpdated && (
-            <p className="text-sm">Last Status Check: {new Date(garminStatus.lastUpdated).toLocaleString()}</p>
-          )}
-          {garminStatus.tokenExpiresAt && (
-            <p className="text-sm">Token Expires: {new Date(garminStatus.tokenExpiresAt).toLocaleString()}</p>
-          )}
-          <Button onClick={handleManualSync} disabled={loading}>
-            {loading ? 'Syncing...' : 'Sync Garmin Data Now'}
-          </Button>
-          <Button onClick={handleUnlinkGarmin} disabled={loading} variant="destructive">
-            Unlink Garmin Connect
-          </Button>
-        </div>
-      )}
     </div>
   );
 };

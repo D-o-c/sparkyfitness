@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { authenticateToken, authorizeAccess } = require('../middleware/authMiddleware');
+const { authenticate } = require('../middleware/authMiddleware');
 const { registerValidation, loginValidation, forgotPasswordValidation, resetPasswordValidation } = require('../validation/authValidation');
 const { validationResult } = require('express-validator');
 const authService = require('../services/authService');
@@ -111,21 +111,40 @@ router.get('/settings', async (req, res, next) => {
     }
 });
 
-router.post('/logout', (req, res, next) => {
-  // Destroy the session for OIDC users
-  if (req.session) {
-    req.session.destroy((err) => {
-      if (err) {
-        return next(err);
+router.post('/logout', async (req, res, next) => {
+  const providerId = req.session?.providerId;
+
+  req.session.destroy(async (err) => {
+    if (err) {
+      return next(err);
+    }
+
+    res.clearCookie('sparky.sid');
+
+    // If OIDC user, return end_session_endpoint for frontend to redirect
+    if (providerId) {
+      try {
+        const provider = await oidcProviderRepository.getOidcProviderById(providerId);
+
+        if (provider && provider.end_session_endpoint) {
+          const frontendUrl = process.env.SPARKY_FITNESS_FRONTEND_URL || 'http://localhost:3000'; // Fallback for development
+          const endSessionUrl = `${provider.end_session_endpoint}?post_logout_redirect_uri=${frontendUrl}/`;
+          return res.status(200).json({
+            message: 'Logout successful.',
+            redirectUrl: endSessionUrl
+          });
+        } else {
+          // Fallback if end_session_endpoint is not discovered
+          console.warn(`OIDC end_session_endpoint not found for providerId: ${providerId}. Proceeding with local logout.`);
+        }
+      } catch (oidcError) {
+        // If OIDC provider lookup fails, proceed with local logout
+        console.error('Error fetching OIDC provider for logout:', oidcError);
       }
-      // Clear the session cookie from the client
-      res.clearCookie('sparky.sid'); // Ensure this matches the session name in SparkyFitnessServer.js
-      res.status(200).json({ message: 'Logout successful.' });
-    });
-  } else {
-    // For JWT users, simply acknowledge logout (client-side token removal is sufficient)
+    }
+
     res.status(200).json({ message: 'Logout successful.' });
-  }
+  });
 });
 
 // Authentication Endpoints
@@ -151,7 +170,7 @@ router.post('/register', registerValidation, async (req, res, next) => {
   }
 });
 
-router.get('/user', authenticateToken, async (req, res, next) => {
+router.get('/user', authenticate, async (req, res, next) => {
   try {
     const user = await authService.getUser(req.userId);
     // Ensure the role is included in the response
@@ -169,7 +188,7 @@ router.get('/user', authenticateToken, async (req, res, next) => {
   }
 });
 
-router.get('/users/find-by-email', authenticateToken, authorizeAccess('admin'), async (req, res, next) => {
+router.get('/users/find-by-email', authenticate, async (req, res, next) => {
   const { email } = req.query;
 
   if (!email) {
@@ -190,7 +209,7 @@ router.get('/users/find-by-email', authenticateToken, authorizeAccess('admin'), 
   }
 });
 
-router.post('/user/generate-api-key', authenticateToken, authorizeAccess('api_keys'), async (req, res, next) => {
+router.post('/user/generate-api-key', authenticate, async (req, res, next) => {
   const { description } = req.body;
  
   try {
@@ -204,7 +223,7 @@ router.post('/user/generate-api-key', authenticateToken, authorizeAccess('api_ke
   }
 });
 
-router.delete('/user/api-key/:apiKeyId', authenticateToken, authorizeAccess('api_keys'), async (req, res, next) => {
+router.delete('/user/api-key/:apiKeyId', authenticate, async (req, res, next) => {
   const { apiKeyId } = req.params;
  
   try {
@@ -221,7 +240,7 @@ router.delete('/user/api-key/:apiKeyId', authenticateToken, authorizeAccess('api
   }
 });
 
-router.get('/users/accessible-users', authenticateToken, async (req, res, next) => {
+router.get('/users/accessible-users', authenticate, async (req, res, next) => {
   try {
     const accessibleUsers = await authService.getAccessibleUsers(req.userId);
     res.status(200).json(accessibleUsers);
@@ -230,7 +249,7 @@ router.get('/users/accessible-users', authenticateToken, async (req, res, next) 
   }
 });
 
-router.get('/profiles', authenticateToken, authorizeAccess('profile', (req) => req.userId), async (req, res, next) => {
+router.get('/profiles', authenticate, async (req, res, next) => {
   try {
     const profile = await authService.getUserProfile(req.userId, req.userId); // authenticatedUserId is targetUserId
     if (!profile) {
@@ -245,7 +264,7 @@ router.get('/profiles', authenticateToken, authorizeAccess('profile', (req) => r
   }
 });
 
-router.put('/profiles', authenticateToken, authorizeAccess('profile', (req) => req.userId), async (req, res, next) => {
+router.put('/profiles', authenticate, async (req, res, next) => {
   const { full_name, phone_number, date_of_birth, bio, avatar_url, gender } = req.body;
  
   try {
@@ -266,7 +285,7 @@ router.put('/profiles', authenticateToken, authorizeAccess('profile', (req) => r
   }
 });
 
-router.get('/user-api-keys', authenticateToken, authorizeAccess('api_keys'), async (req, res, next) => {
+router.get('/user-api-keys', authenticate, async (req, res, next) => {
   try {
     const apiKeys = await authService.getUserApiKeys(req.userId, req.userId); // authenticatedUserId is targetUserId
     res.status(200).json(apiKeys);
@@ -278,7 +297,7 @@ router.get('/user-api-keys', authenticateToken, authorizeAccess('api_keys'), asy
   }
 });
 
-router.post('/update-password', authenticateToken, async (req, res, next) => {
+router.post('/update-password', authenticate, async (req, res, next) => {
   const { newPassword } = req.body;
  
   if (!newPassword) {
@@ -296,7 +315,7 @@ router.post('/update-password', authenticateToken, async (req, res, next) => {
   }
 });
 
-router.post('/update-email', authenticateToken, async (req, res, next) => {
+router.post('/update-email', authenticate, async (req, res, next) => {
   const { newEmail } = req.body;
  
   if (!newEmail) {
@@ -317,7 +336,7 @@ router.post('/update-email', authenticateToken, async (req, res, next) => {
   }
 });
 
-router.get('/access/can-access-user-data', authenticateToken, async (req, res, next) => {
+router.get('/access/can-access-user-data', authenticate, async (req, res, next) => {
   const { targetUserId, permissionType } = req.query;
  
   if (!targetUserId || !permissionType) {
@@ -332,7 +351,7 @@ router.get('/access/can-access-user-data', authenticateToken, async (req, res, n
   }
 });
 
-router.get('/access/check-family-access', authenticateToken, async (req, res, next) => {
+router.get('/access/check-family-access', authenticate, async (req, res, next) => {
   const { ownerUserId, permission } = req.query;
  
   if (!ownerUserId || !permission) {
@@ -347,43 +366,24 @@ router.get('/access/check-family-access', authenticateToken, async (req, res, ne
   }
 });
 
-router.get('/family-access', authenticateToken, authorizeAccess('family_access', (req) => req.query.owner_user_id), async (req, res, next) => {
-  const { owner_user_id: targetUserId } = req.query;
- 
-  if (!targetUserId) {
-    return res.status(400).json({ error: 'Target User ID is required.' });
-  }
- 
+router.get('/family-access', authenticate, async (req, res, next) => {
   try {
-    const entries = await authService.getFamilyAccessEntries(req.userId, targetUserId);
+    const authenticatedUserId = req.userId;
+    if (!authenticatedUserId) {
+      return res.status(401).json({ error: 'Unauthorized', message: 'Authenticated user ID not found.' });
+    }
+
+    // The RLS policy on the family_access table will ensure that only records
+    // where the authenticated user is either the owner_user_id or the family_user_id are returned.
+    const entries = await authService.getFamilyAccessEntries(authenticatedUserId);
     res.status(200).json(entries);
   } catch (error) {
-    if (error.message.startsWith('Forbidden')) {
-      return res.status(403).json({ error: error.message });
-    }
+    log('error', `Error fetching family access entries:`, error);
     next(error);
   }
 });
 
-router.get('/family-access/:targetUserId', authenticateToken, authorizeAccess('family_access', (req) => req.params.targetUserId), async (req, res, next) => {
-  const { targetUserId } = req.params;
- 
-  if (!targetUserId) {
-    return res.status(400).json({ error: 'Target User ID is required.' });
-  }
- 
-  try {
-    const entries = await authService.getFamilyAccessEntries(req.userId, targetUserId);
-    res.status(200).json(entries);
-  } catch (error) {
-    if (error.message.startsWith('Forbidden')) {
-      return res.status(403).json({ error: error.message });
-    }
-    next(error);
-  }
-});
-
-router.post('/family-access', authenticateToken, authorizeAccess('family_access', (req) => req.body.owner_user_id), async (req, res, next) => {
+router.post('/family-access', authenticate, async (req, res, next) => {
   const entryData = req.body;
  
   if (!entryData.family_user_id || !entryData.family_email || !entryData.access_permissions) {
@@ -401,7 +401,7 @@ router.post('/family-access', authenticateToken, authorizeAccess('family_access'
   }
 });
 
-router.put('/family-access/:id', authenticateToken, authorizeAccess('family_access', (req) => req.body.owner_user_id), async (req, res, next) => {
+router.put('/family-access/:id', authenticate, async (req, res, next) => {
   const { id } = req.params;
   const updateData = req.body;
  
@@ -423,7 +423,7 @@ router.put('/family-access/:id', authenticateToken, authorizeAccess('family_acce
   }
 });
 
-router.delete('/family-access/:id', authenticateToken, authorizeAccess('family_access', (req) => req.body.owner_user_id), async (req, res, next) => {
+router.delete('/family-access/:id', authenticate, async (req, res, next) => {
   const { id } = req.params;
  
   if (!id) {
@@ -444,7 +444,7 @@ router.delete('/family-access/:id', authenticateToken, authorizeAccess('family_a
   }
 });
 
-router.post('/profiles/avatar', authenticateToken, upload.single('avatar'), async (req, res, next) => {
+router.post('/profiles/avatar', authenticate, upload.single('avatar'), async (req, res, next) => {
   try {
     if (!req.file) {
       console.error('Multer did not provide a file for upload.');
@@ -464,7 +464,7 @@ router.post('/profiles/avatar', authenticateToken, upload.single('avatar'), asyn
   }
 });
 
-router.get('/profiles/avatar/:filename', authenticateToken, async (req, res, next) => {
+router.get('/profiles/avatar/:filename', authenticate, async (req, res, next) => {
   try {
     const { filename } = req.params;
     const userId = req.userId; // Authenticated user ID

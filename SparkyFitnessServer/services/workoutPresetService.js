@@ -1,5 +1,6 @@
 const workoutPresetRepository = require('../models/workoutPresetRepository');
 const exerciseRepository = require('../models/exerciseRepository');
+const preferenceRepository = require('../models/preferenceRepository');
 const { log } = require('../config/logging');
 const { isValidUuid, resolveExerciseIdToUuid } = require('../utils/uuidUtils'); // Import uuidUtils
 
@@ -7,7 +8,7 @@ async function createWorkoutPreset(userId, presetData) {
   // Validate and resolve exercise_ids
   for (const ex of presetData.exercises) {
     ex.exercise_id = await resolveExerciseIdToUuid(ex.exercise_id); // Resolve to UUID
-    const exercise = await exerciseRepository.getExerciseById(ex.exercise_id);
+    const exercise = await exerciseRepository.getExerciseById(ex.exercise_id, userId);
     if (!exercise) {
       throw new Error(`Exercise with ID ${ex.exercise_id} not found.`);
     }
@@ -22,16 +23,16 @@ async function createWorkoutPreset(userId, presetData) {
   return workoutPresetRepository.createWorkoutPreset(presetData);
 }
 
-async function getWorkoutPresets(userId) {
-  return workoutPresetRepository.getWorkoutPresets(userId);
+async function getWorkoutPresets(userId, page, limit) {
+  return workoutPresetRepository.getWorkoutPresets(userId, page, limit);
 }
 
 async function getWorkoutPresetById(userId, presetId) {
-  const preset = await workoutPresetRepository.getWorkoutPresetById(presetId);
+  const preset = await workoutPresetRepository.getWorkoutPresetById(presetId, userId);
   if (!preset) {
     throw new Error('Workout preset not found.');
   }
-  const ownerId = await workoutPresetRepository.getWorkoutPresetOwnerId(presetId);
+  const ownerId = await workoutPresetRepository.getWorkoutPresetOwnerId(userId, presetId);
   if (ownerId !== userId && !preset.is_public) {
     throw new Error('Forbidden: You do not have access to this workout preset.');
   }
@@ -39,7 +40,7 @@ async function getWorkoutPresetById(userId, presetId) {
 }
 
 async function updateWorkoutPreset(userId, presetId, updateData) {
-  const ownerId = await workoutPresetRepository.getWorkoutPresetOwnerId(presetId);
+  const ownerId = await workoutPresetRepository.getWorkoutPresetOwnerId(userId, presetId);
   if (ownerId !== userId) {
     throw new Error('Forbidden: You do not have permission to update this workout preset.');
   }
@@ -47,7 +48,7 @@ async function updateWorkoutPreset(userId, presetId, updateData) {
   if (updateData.exercises) {
     for (const ex of updateData.exercises) {
       ex.exercise_id = await resolveExerciseIdToUuid(ex.exercise_id); // Resolve to UUID
-      const exercise = await exerciseRepository.getExerciseById(ex.exercise_id);
+      const exercise = await exerciseRepository.getExerciseById(ex.exercise_id, userId);
       if (!exercise) {
         throw new Error(`Exercise with ID ${ex.exercise_id} not found.`);
       }
@@ -64,7 +65,7 @@ async function updateWorkoutPreset(userId, presetId, updateData) {
 }
 
 async function deleteWorkoutPreset(userId, presetId) {
-  const ownerId = await workoutPresetRepository.getWorkoutPresetOwnerId(presetId);
+  const ownerId = await workoutPresetRepository.getWorkoutPresetOwnerId(userId, presetId);
   if (ownerId !== userId) {
     throw new Error('Forbidden: You do not have permission to delete this workout preset.');
   }
@@ -76,6 +77,10 @@ async function deleteWorkoutPreset(userId, presetId) {
 }
 
 async function searchWorkoutPresets(searchTerm, userId, limit) {
+  if (limit === null || limit === undefined) {
+    const preferences = await preferenceRepository.getUserPreferences(userId);
+    limit = preferences ? preferences.item_display_limit : 10;
+  }
   return workoutPresetRepository.searchWorkoutPresets(searchTerm, userId, limit);
 }
 

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"; // New import
@@ -13,6 +13,8 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Plus, Loader2, Search, ChevronLeft, ChevronRight, Volume2, XCircle } from "lucide-react"; // Added Loader2, Search, ChevronLeft, ChevronRight, Volume2, XCircle
 import { useToast } from "@/hooks/use-toast";
 import { getExternalDataProviders, DataProvider, getProviderCategory } from '@/services/externalProviderService'; // New import
+import { Badge } from "@/components/ui/badge";
+import { Share2, Users } from "lucide-react";
 import BodyMapFilter from './BodyMapFilter'; // Import BodyMapFilter
 import { Textarea } from "@/components/ui/textarea"; // New import
 import { Label } from "@/components/ui/label"; // New import
@@ -207,39 +209,39 @@ const ExerciseSearch = ({ onExerciseSelect, showInternalTab = true, selectedDate
     fetchFilters();
   }, [loggingLevel, toast]);
 
-  useEffect(() => {
-    debug(loggingLevel, "ExerciseSearch: fetchProviders useEffect triggered. Current searchSource:", searchSource);
-    const fetchProviders = async () => {
-      try {
-        const fetchedProviders = await getExternalDataProviders();
-        debug(loggingLevel, "ExerciseSearch: Fetched providers:", fetchedProviders);
-        const exerciseProviders = fetchedProviders.filter(p => {
-          const categories = getProviderCategory(p); // Changed to categories (plural)
-          debug(loggingLevel, `ExerciseSearch: Filtering provider: ${p.provider_name}, categories: ${categories.join(', ')}, is_active: ${p.is_active}`);
-          return categories.includes('exercise') && p.is_active; // Changed to .includes()
-        });
-        debug(loggingLevel, "ExerciseSearch: Filtered exercise providers:", exerciseProviders);
-        setProviders(exerciseProviders);
-        if (exerciseProviders.length > 0) {
-          setSelectedProviderId(exerciseProviders[0].id); // Auto-select first enabled exercise provider's ID
-          setSelectedProviderType(exerciseProviders[0].provider_type); // Auto-select first enabled exercise provider's Type
-        } else {
-          warn(loggingLevel, "ExerciseSearch: No enabled exercise providers found.");
-        }
-      } catch (err) {
-        error(loggingLevel, "ExerciseSearch: Error fetching external data providers:", err);
-        toast({
-          title: "Error",
-          description: `Failed to load external providers: ${err instanceof Error ? err.message : String(err)}`,
-          variant: "destructive"
-        });
+  const fetchProviders = useCallback(async () => {
+    debug(loggingLevel, "ExerciseSearch: fetchProviders triggered. Current searchSource:", searchSource);
+    try {
+      const fetchedProviders = await getExternalDataProviders();
+      debug(loggingLevel, "ExerciseSearch: Fetched providers:", fetchedProviders);
+      const exerciseProviders = fetchedProviders.filter(p => {
+        const categories = getProviderCategory(p);
+        debug(loggingLevel, `ExerciseSearch: Filtering provider: ${p.provider_name}, categories: ${categories.join(', ')}, is_active: ${p.is_active}`);
+        return categories.includes('exercise') && p.is_active;
+      });
+      debug(loggingLevel, "ExerciseSearch: Filtered exercise providers:", exerciseProviders);
+      setProviders(exerciseProviders);
+      if (exerciseProviders.length > 0) {
+        setSelectedProviderId(exerciseProviders[0].id);
+        setSelectedProviderType(exerciseProviders[0].provider_type);
+      } else {
+        warn(loggingLevel, "ExerciseSearch: No enabled exercise providers found.");
       }
-    };
+    } catch (err) {
+      error(loggingLevel, "ExerciseSearch: Error fetching external data providers:", err);
+      toast({
+        title: "Error",
+        description: `Failed to load external providers: ${err instanceof Error ? err.message : String(err)}`,
+        variant: "destructive"
+      });
+    }
+  }, [loggingLevel, toast, searchSource]); // Dependencies for useCallback
 
+  useEffect(() => {
     if (searchSource === 'external') {
       fetchProviders();
     }
-  }, [searchSource, loggingLevel, toast]);
+  }, [searchSource, fetchProviders]); // Dependencies for useEffect
 
   const handleNextImage = () => {
     setCurrentImageIndex((prevIndex) => (prevIndex + 1) % (exercises[0]?.images?.length || 1));
@@ -374,7 +376,16 @@ const ExerciseSearch = ({ onExerciseSelect, showInternalTab = true, selectedDate
               {exercises.map((exercise) => (
                 <div key={exercise.id} className="flex items-center justify-between p-3 border rounded-lg">
                   <div>
-                    <div className="font-medium">{exercise.name}</div>
+                    <div className="font-medium flex items-center gap-2">
+                        {exercise.name}
+                        {exercise.tags && exercise.tags.map(tag => (
+                            <Badge key={tag} variant="outline" className="text-xs">
+                                {tag === 'public' && <Share2 className="h-3 w-3 mr-1" />}
+                                {tag === 'family' && <Users className="h-3 w-3 mr-1" />}
+                                {tag.charAt(0).toUpperCase() + tag.slice(1)}
+                            </Badge>
+                        ))}
+                    </div>
                     <div className="text-sm text-gray-500">
                       {exercise.category} • {exercise.calories_per_hour} cal/hour
                     </div>

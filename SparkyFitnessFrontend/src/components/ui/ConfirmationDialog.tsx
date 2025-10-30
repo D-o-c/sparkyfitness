@@ -7,6 +7,8 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Terminal } from 'lucide-react';
 
 interface ConfirmationDialogProps {
   open: boolean;
@@ -14,6 +16,9 @@ interface ConfirmationDialogProps {
   onConfirm: () => void;
   title: string;
   description: React.ReactNode;
+  warning?: React.ReactNode;
+  variant?: 'default' | 'destructive';
+  confirmLabel?: string;
 }
 
 const ConfirmationDialog: React.FC<ConfirmationDialogProps> = ({
@@ -22,6 +27,9 @@ const ConfirmationDialog: React.FC<ConfirmationDialogProps> = ({
   onConfirm,
   title,
   description,
+  warning,
+  variant = 'default',
+  confirmLabel,
 }) => {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -30,12 +38,22 @@ const ConfirmationDialog: React.FC<ConfirmationDialogProps> = ({
           <DialogTitle>{title}</DialogTitle>
           <div className="text-sm text-muted-foreground">{description}</div>
         </DialogHeader>
+        {warning && (
+          <Alert variant="destructive">
+            <Terminal className="h-4 w-4" />
+            <AlertTitle>Warning</AlertTitle>
+            <AlertDescription>{warning}</AlertDescription>
+          </Alert>
+        )}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button variant="destructive" onClick={onConfirm}>
-            Confirm
+          <Button
+            variant={variant === 'destructive' ? 'destructive' : 'default'}
+            onClick={onConfirm}
+          >
+            {confirmLabel || 'Confirm'}
           </Button>
         </DialogFooter>
       </DialogContent>

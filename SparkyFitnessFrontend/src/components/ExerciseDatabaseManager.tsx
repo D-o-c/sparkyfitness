@@ -7,10 +7,17 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import AddExerciseDialog from "./AddExerciseDialog";
 import ConfirmationDialog from "@/components/ui/ConfirmationDialog";
 import { Pagination, PaginationContent, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious } from "@/components/ui/pagination";
-import { Plus, Edit, Trash2, Share2, Lock, XCircle } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Plus, Edit, Trash2, Share2, Users, Lock, XCircle } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
 import { usePreferences } from "@/contexts/PreferencesContext";
 import { useAuth } from "@/hooks/useAuth";
@@ -23,6 +30,8 @@ import {
   updateExerciseShareStatus,
   getExerciseDeletionImpact,
   ExerciseDeletionImpact,
+  updateExerciseEntriesSnapshot,
+  ExerciseOwnershipFilter,
 } from '@/services/exerciseService';
 import { Exercise as ExerciseInterface } from '@/services/exerciseSearchService';
 import WorkoutPresetsManager from './WorkoutPresetsManager'; // Import the new component
@@ -41,7 +50,7 @@ const ExerciseDatabaseManager: React.FC<ExerciseDatabaseManagerProps> = ({ onPre
   const [totalExercisesCount, setTotalExercisesCount] = useState(0);
   const [searchTerm, setSearchTerm] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("all");
-  const [ownershipFilter, setOwnershipFilter] = useState("all");
+  const [ownershipFilter, setOwnershipFilter] = useState<ExerciseOwnershipFilter>("all");
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage, setItemsPerPage] = useState(10);
   const [isAddExerciseDialogOpen, setIsAddExerciseDialogOpen] = useState(false);
@@ -65,7 +74,9 @@ const ExerciseDatabaseManager: React.FC<ExerciseDatabaseManagerProps> = ({ onPre
   const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
   const [deletionImpact, setDeletionImpact] = useState<ExerciseDeletionImpact | null>(null);
   const [exerciseToDelete, setExerciseToDelete] = useState<ExerciseInterface | null>(null);
-
+  const [showSyncConfirmation, setShowSyncConfirmation] = useState(false);
+  const [syncExerciseId, setSyncExerciseId] = useState<string | null>(null);
+ 
   useEffect(() => {
     if (user?.id) {
       loadExercisesData();
@@ -136,7 +147,12 @@ const ExerciseDatabaseManager: React.FC<ExerciseDatabaseManagerProps> = ({ onPre
         title: "Success",
         description: "Exercise edited successfully",
       });
-      loadExercisesData();
+      if (user?.id === selectedExercise.user_id) {
+        setSyncExerciseId(selectedExercise.id);
+        setShowSyncConfirmation(true);
+      } else {
+        loadExercisesData();
+      }
       setIsEditDialogOpen(false);
       setSelectedExercise(null);
       setNewExerciseImageFiles([]);
@@ -171,11 +187,21 @@ const ExerciseDatabaseManager: React.FC<ExerciseDatabaseManagerProps> = ({ onPre
   const confirmDelete = async () => {
     if (!exerciseToDelete || !user) return;
     try {
-      await deleteExercise(exerciseToDelete.id, user.id);
-      toast({
-        title: "Success",
-        description: "Exercise deleted successfully.",
-      });
+      // Decide whether to force delete based on deletionImpact
+      const shouldForce = deletionImpact && !deletionImpact.isUsedByOthers && deletionImpact.exerciseEntriesCount > 0;
+      const response = await deleteExercise(exerciseToDelete.id, user.id, shouldForce);
+      // Interpret server response status for user feedback
+      if (response && response.status) {
+        if (response.status === 'deleted' || response.status === 'force_deleted') {
+          toast({ title: 'Success', description: 'Exercise deleted successfully.' });
+        } else if (response.status === 'hidden') {
+          toast({ title: 'Success', description: 'Exercise hidden (marked as quick). Historical entries remain.' });
+        } else {
+          toast({ title: 'Success', description: response.message || 'Exercise delete operation completed.' });
+        }
+      } else {
+        toast({ title: 'Success', description: 'Exercise deleted successfully.' });
+      }
       loadExercisesData();
     } catch (err) {
       error(loggingLevel, "Error deleting exercise:", err);
@@ -207,6 +233,56 @@ const ExerciseDatabaseManager: React.FC<ExerciseDatabaseManagerProps> = ({ onPre
         variant: "destructive",
       });
     }
+  };
+
+  const handleSyncConfirmation = async () => {
+    if (syncExerciseId) {
+      try {
+        await updateExerciseEntriesSnapshot(syncExerciseId);
+        toast({
+          title: "Success",
+          description: "Past diary entries have been updated.",
+        });
+      } catch (error) {
+        toast({
+          title: "Error",
+          description: "Failed to update past diary entries.",
+          variant: "destructive",
+        });
+      }
+    }
+    setShowSyncConfirmation(false);
+    loadExercisesData();
+  };
+ 
+  const getExerciseSourceBadge = (exercise: ExerciseInterface, currentUserId: string | undefined) => {
+    if (!exercise.user_id) {
+      return (
+        <Badge variant="outline" className="text-xs w-fit">
+          System
+        </Badge>
+      );
+    }
+
+    if (exercise.user_id === currentUserId) {
+      return (
+        <Badge variant="secondary" className="text-xs w-fit">
+          Private
+        </Badge>
+      );
+    }
+
+    if (exercise.user_id !== currentUserId && !exercise.shared_with_public) {
+      return (
+        <Badge
+          variant="outline"
+          className="text-xs w-fit bg-blue-50 text-blue-700"
+        >
+          Family
+        </Badge>
+      );
+    }
+    return null; // No badge from getExerciseSourceBadge if it's public and not owned by user
   };
 
   return (
@@ -241,7 +317,7 @@ const ExerciseDatabaseManager: React.FC<ExerciseDatabaseManagerProps> = ({ onPre
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              <Select onValueChange={setOwnershipFilter} defaultValue={ownershipFilter}>
+              <Select onValueChange={(value) => setOwnershipFilter(value as ExerciseOwnershipFilter)} defaultValue={ownershipFilter}>
                 <SelectTrigger className="w-32">
                   <SelectValue placeholder="All" />
                 </SelectTrigger>
@@ -250,6 +326,7 @@ const ExerciseDatabaseManager: React.FC<ExerciseDatabaseManagerProps> = ({ onPre
                   <SelectItem value="own">My Own</SelectItem>
                   <SelectItem value="family">Family</SelectItem>
                   <SelectItem value="public">Public</SelectItem>
+                  <SelectItem value="needs-review">Needs Review</SelectItem>
                 </SelectContent>
               </Select>
               <Button className="bg-slate-900 hover:bg-slate-800 text-white" onClick={() => setIsAddExerciseDialogOpen(true)}>
@@ -283,26 +360,13 @@ const ExerciseDatabaseManager: React.FC<ExerciseDatabaseManagerProps> = ({ onPre
                 <div className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
                     <h4 className="font-medium">{exercise.name}</h4>
-                    {exercise.source === 'wger' && (
-                      <span className="text-xs px-2 py-1 rounded-full bg-green-100 text-green-800">
-                        Wger
-                      </span>
-                    )}
-                    {exercise.source === 'free-exercise-db' && (
-                      <span className="text-xs px-2 py-1 rounded-full bg-purple-100 text-purple-800">
-                        Free Exercise DB
-                      </span>
-                    )}
-                    {exercise.source === 'nutritionix' && (
-                      <span className="text-xs px-2 py-1 rounded-full bg-yellow-100 text-yellow-800">
-                        Nutritionix
-                      </span>
-                    )}
-                    {exercise.is_custom && !exercise.source && (
-                      <span className="text-xs px-2 py-1 rounded-full bg-blue-100 text-blue-800">
-                        Custom
-                      </span>
-                    )}
+                    {exercise.tags && exercise.tags.map(tag => (
+                        <Badge key={tag} variant="outline" className="text-xs">
+                            {tag === 'public' && <Share2 className="h-3 w-3 mr-1" />}
+                            {tag === 'family' && <Users className="h-3 w-3 mr-1" />}
+                            {tag.charAt(0).toUpperCase() + tag.slice(1)}
+                        </Badge>
+                    ))}
                   </div>
                   <div className="text-sm text-gray-600 mb-1">
                     {exercise.category}
@@ -337,53 +401,92 @@ const ExerciseDatabaseManager: React.FC<ExerciseDatabaseManagerProps> = ({ onPre
                   )}
                 </div>
                 <div className="flex items-center space-x-1">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => {
-                      setSelectedExercise(exercise);
-                      setEditExerciseName(exercise.name);
-                      setEditExerciseCategory(exercise.category);
-                      setEditExerciseCalories(exercise.calories_per_hour);
-                      setEditExerciseDescription(exercise.description || "");
-                      setEditExerciseLevel(exercise.level?.toLowerCase() || "");
-                      setEditExerciseForce(exercise.force?.toLowerCase() || "");
-                      setEditExerciseMechanic(exercise.mechanic?.toLowerCase() || "");
-                      setEditExerciseEquipment(Array.isArray(exercise.equipment) ? exercise.equipment : []);
-                      setEditExercisePrimaryMuscles(Array.isArray(exercise.primary_muscles) ? exercise.primary_muscles : []);
-                      setEditExerciseSecondaryMuscles(Array.isArray(exercise.secondary_muscles) ? exercise.secondary_muscles : []);
-                      setEditExerciseInstructions(Array.isArray(exercise.instructions) ? exercise.instructions : []);
-                      setEditExerciseImages(Array.isArray(exercise.images) ? exercise.images : []);
-                      setNewExerciseImageFiles([]);
-                      setNewExerciseImageUrls([]);
-                      setIsEditDialogOpen(true);
-                    }}
-                    className="h-8 w-8"
-                  >
-                    <Edit className="w-4 h-4" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => handleDeleteRequest(exercise)}
-                    className="h-8 w-8 hover:bg-gray-200 dark:hover:bg-gray-800"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </Button>
-                  {exercise.user_id === user?.id && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => handleShareExercise(exercise.id, !exercise.shared_with_public)}
-                      className="h-8 w-8"
-                    >
-                      {exercise.shared_with_public ? (
-                        <Lock className="w-4 h-4" />
-                      ) : (
-                        <Share2 className="w-4 h-4" />
-                      )}
-                    </Button>
-                  )}
+                  {/* Share/Lock Button */}
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => handleShareExercise(exercise.id, !exercise.shared_with_public)}
+                          className="h-8 w-8"
+                          disabled={exercise.user_id !== user?.id} // Disable if not owned by user
+                        >
+                          {exercise.shared_with_public ? (
+                            <Share2 className="w-4 h-4" />
+                          ) : (
+                            <Lock className="w-4 h-4" />
+                          )}
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>
+                          {exercise.user_id === user?.id
+                            ? exercise.shared_with_public
+                              ? "Make private"
+                              : "Share with public"
+                            : "Not editable"}
+                        </p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+
+                  {/* Edit Button */}
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => {
+                            setSelectedExercise(exercise);
+                            setEditExerciseName(exercise.name);
+                            setEditExerciseCategory(exercise.category);
+                            setEditExerciseCalories(exercise.calories_per_hour ?? 0); // Handle null or undefined
+                            setEditExerciseDescription(exercise.description || "");
+                            setEditExerciseLevel(exercise.level?.toLowerCase() || "");
+                            setEditExerciseForce(exercise.force?.toLowerCase() || "");
+                            setEditExerciseMechanic(exercise.mechanic?.toLowerCase() || "");
+                            setEditExerciseEquipment(Array.isArray(exercise.equipment) ? exercise.equipment : []);
+                            setEditExercisePrimaryMuscles(Array.isArray(exercise.primary_muscles) ? exercise.primary_muscles : []);
+                            setEditExerciseSecondaryMuscles(Array.isArray(exercise.secondary_muscles) ? exercise.secondary_muscles : []);
+                            setEditExerciseInstructions(Array.isArray(exercise.instructions) ? exercise.instructions : []);
+                            setEditExerciseImages(Array.isArray(exercise.images) ? exercise.images : []);
+                            setNewExerciseImageFiles([]);
+                            setNewExerciseImageUrls([]);
+                            setIsEditDialogOpen(true);
+                          }}
+                          className="h-8 w-8"
+                          disabled={exercise.user_id !== user?.id} // Disable if not owned by user
+                        >
+                          <Edit className="w-4 h-4" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>{exercise.user_id === user?.id ? "Edit exercise" : "Not editable"}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+
+                  {/* Delete Button */}
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => handleDeleteRequest(exercise)}
+                          className="h-8 w-8 hover:bg-gray-200 dark:hover:bg-gray-800"
+                          disabled={exercise.user_id !== user?.id} // Disable if not owned by user
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>{exercise.user_id === user?.id ? "Delete exercise" : "Not editable"}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
                 </div>
               </div>
             ))}
@@ -444,14 +547,7 @@ const ExerciseDatabaseManager: React.FC<ExerciseDatabaseManagerProps> = ({ onPre
           <CardTitle>Workout Presets</CardTitle>
         </CardHeader>
         <CardContent>
-          <WorkoutPresetsManager onUsePreset={(preset) => {
-            info(loggingLevel, `Using preset: ${preset.name}`);
-            toast({
-              title: "Preset Loaded",
-              description: `Workout preset "${preset.name}" loaded to diary.`,
-            });
-            onPresetExercisesSelected(preset.exercises);
-          }} />
+          <WorkoutPresetsManager />
         </CardContent>
       </Card>
 
@@ -748,15 +844,38 @@ const ExerciseDatabaseManager: React.FC<ExerciseDatabaseManagerProps> = ({ onPre
           open={showDeleteConfirmation}
           onOpenChange={setShowDeleteConfirmation}
           onConfirm={confirmDelete}
-          title={`Delete ${exerciseToDelete.name}?`}
+          title={deletionImpact.isUsedByOthers ? `Delete ${exerciseToDelete.name}?` : `Delete ${exerciseToDelete.name}?`}
           description={
             <div>
-              <p>This will permanently delete the exercise and all associated data:</p>
-              <ul className="list-disc pl-5 mt-2">
-                <li>{deletionImpact.exerciseEntriesCount} diary entries</li>
-              </ul>
+              {deletionImpact.isUsedByOthers ? (
+                <>
+                  <p>This exercise is used by other users. Deleting it will affect their data and is not allowed; it will be hidden instead.</p>
+                  <ul className="list-disc pl-5 mt-2">
+                    <li>{deletionImpact.exerciseEntriesCount} diary entries (across users)</li>
+                  </ul>
+                </>
+              ) : (
+                <>
+                  <p>This will permanently delete the exercise and all associated data for your account.</p>
+                  <ul className="list-disc pl-5 mt-2">
+                    <li>{deletionImpact.exerciseEntriesCount} diary entries</li>
+                  </ul>
+                </>
+              )}
             </div>
           }
+          warning={deletionImpact.isUsedByOthers ? "This exercise is used in workouts or diaries by other users. Deleting it will affect their data. It will be hidden instead." : undefined}
+          variant={deletionImpact.isUsedByOthers ? "destructive" : "destructive"}
+          confirmLabel={!deletionImpact.isUsedByOthers && deletionImpact.exerciseEntriesCount > 0 ? 'Force Delete' : 'Confirm'}
+        />
+      )}
+      {showSyncConfirmation && (
+        <ConfirmationDialog
+          open={showSyncConfirmation}
+          onOpenChange={setShowSyncConfirmation}
+          onConfirm={handleSyncConfirmation}
+          title="Sync Past Entries?"
+          description="Do you want to update all your past diary entries for this exercise with the new information?"
         />
       )}
     </div>

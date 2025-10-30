@@ -20,6 +20,7 @@ import EnhancedCustomFoodForm from "./EnhancedCustomFoodForm";
 import FoodUnitSelector from "./FoodUnitSelector";
 import CopyFoodEntryDialog from "./CopyFoodEntryDialog"; // Import the new dialog component
 import ExerciseSearch from "./ExerciseSearch"; // Import ExerciseSearch
+import EditMealFoodEntryDialog from "./EditMealFoodEntryDialog"; // Import the new dialog
 import { debug, info, warn, error } from "@/utils/logging"; // Import logging utility
 import { calculateFoodEntryNutrition } from "@/utils/nutritionCalculations"; // Import the new utility function
 import { toast } from "@/hooks/use-toast"; // Import toast
@@ -88,6 +89,7 @@ const FoodDiary = ({
   const [date, setDate] = useState<Date>(new Date(selectedDate));
   const [foodEntries, setFoodEntries] = useState<FoodEntry[]>([]);
   const [editingEntry, setEditingEntry] = useState<FoodEntry | null>(null);
+  const [editingMealId, setEditingMealId] = useState<string | null>(null);
   const [goals, setGoals] = useState<ExpandedGoals | null>(null);
   const [dayTotals, setDayTotals] = useState<MealTotals>({
     calories: 0,
@@ -179,20 +181,17 @@ const FoodDiary = ({
       `Querying food_entries for user: ${currentUserId} and entry_date: ${selectedDate}`,
     ); // Added debug log
     try {
-      const data = await loadFoodEntries(currentUserId, selectedDate, loggingLevel); // Use imported loadFoodEntries
+      const data = await loadFoodEntries(currentUserId, selectedDate); // Use imported loadFoodEntries
       info(loggingLevel, "Food entries loaded successfully:", data);
       debug(loggingLevel, "Raw food entries from API:", data); // Added raw data log
       const processedData = (data || []).map(entry => {
-        debug(loggingLevel, `Processing entry for food: ${entry.foods.name}, raw glycemic_index: ${entry.food_variants?.glycemic_index}`); // Log raw GI
+        debug(loggingLevel, `Processing entry for food: ${entry.food_name}, raw glycemic_index: ${entry.glycemic_index}`); // Log raw GI
         return {
           ...entry,
-          food_variants: entry.food_variants ? {
-            ...entry.food_variants,
-            glycemic_index: normalizeGlycemicIndex(entry.food_variants.glycemic_index)
-          } : entry.food_variants
+          glycemic_index: normalizeGlycemicIndex(entry.glycemic_index)
         };
       });
-      debug(loggingLevel, "Processed food entries with glycemic_index:", processedData.map(entry => ({ food_name: entry.foods.name, glycemic_index: entry.food_variants?.glycemic_index })));
+      debug(loggingLevel, "Processed food entries with glycemic_index:", processedData.map(entry => ({ food_name: entry.food_name, glycemic_index: entry.glycemic_index })));
       setFoodEntries(processedData);
       _calculateDayTotals(processedData);
     } catch (err) {
@@ -545,9 +544,13 @@ const FoodDiary = ({
   const handleEditEntry = useCallback(
     (entry: FoodEntry) => {
       debug(loggingLevel, "Handling edit food entry:", entry);
-      setEditingEntry(entry);
+      if (entry.meal_id) {
+        setEditingMealId(entry.meal_id);
+      } else {
+        setEditingEntry(entry);
+      }
     },
-    [debug, loggingLevel, setEditingEntry],
+    [debug, loggingLevel, setEditingEntry, setEditingMealId],
   );
 
   const handleEditFood = useCallback(
@@ -571,7 +574,8 @@ const FoodDiary = ({
 
   const handleWorkoutPresetSelected = useCallback((preset: WorkoutPreset) => {
     debug(loggingLevel, "Workout preset selected:", preset);
-    setExercisesToLogFromPreset(preset.exercises || []); // Directly use preset.exercises
+    // TODO: Fix this type mismatch
+    // setExercisesToLogFromPreset(preset.exercises.map(e => ({...e, reps: e.reps || null, weight: e.weight || null})) || []);
   }, [debug, loggingLevel]);
 
   return (
@@ -737,6 +741,15 @@ const FoodDiary = ({
         />
       )}
 
+      {/* Edit Meal Food Entry Dialog */}
+      {editingMealId && (
+        <EditMealFoodEntryDialog
+          mealId={editingMealId}
+          open={true}
+          onOpenChange={(open) => !open && setEditingMealId(null)}
+          onSave={handleDataChange}
+        />
+      )}
     </div>
   );
 };

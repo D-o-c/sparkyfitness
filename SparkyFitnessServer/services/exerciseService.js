@@ -1,5 +1,9 @@
-const { getPool } = require('../db/poolManager'); // Import the database connection pool
+const { getClient, getSystemClient } = require('../db/poolManager'); // Import the database connection pool
 const exerciseRepository = require('../models/exerciseRepository');
+// Require concrete exercise and exerciseEntry modules directly to avoid circular export issues
+const exerciseDb = require('../models/exercise');
+const exerciseEntryDb = require('../models/exerciseEntry');
+const activityDetailsRepository = require('../models/activityDetailsRepository'); // New import
 const userRepository = require('../models/userRepository');
 const preferenceRepository = require('../models/preferenceRepository');
 const { v4: uuidv4 } = require('uuid'); // New import for UUID generation
@@ -14,6 +18,9 @@ const fs = require('fs'); // Import file system module
 const path = require('path'); // Import path module
 const { isValidUuid, resolveExerciseIdToUuid } = require('../utils/uuidUtils'); // Import uuidUtils
 const papa = require('papaparse');
+const {
+  checkFamilyAccessPermission,
+} = require("../models/familyAccessRepository");
 
 async function getExercisesWithPagination(authenticatedUserId, targetUserId, searchTerm, categoryFilter, ownershipFilter, equipmentFilter, muscleGroupFilter, currentPage, itemsPerPage) {
   try {
@@ -21,10 +28,31 @@ async function getExercisesWithPagination(authenticatedUserId, targetUserId, sea
     const offset = ((parseInt(currentPage, 10) || 1) - 1) * limit;
 
     const [exercises, totalCount] = await Promise.all([
-      exerciseRepository.getExercisesWithPagination(targetUserId, searchTerm, categoryFilter, ownershipFilter, equipmentFilter, muscleGroupFilter, limit, offset),
-      exerciseRepository.countExercises(targetUserId, searchTerm, categoryFilter, ownershipFilter, equipmentFilter, muscleGroupFilter)
+      exerciseDb.getExercisesWithPagination(targetUserId, searchTerm, categoryFilter, ownershipFilter, equipmentFilter, muscleGroupFilter, limit, offset),
+      exerciseDb.countExercises(targetUserId, searchTerm, categoryFilter, ownershipFilter, equipmentFilter, muscleGroupFilter)
     ]);
-    return { exercises, totalCount };
+    const taggedExercises = await Promise.all(
+        exercises.map(async (exercise) => {
+            const tags = [];
+            const isOwner = exercise.user_id === authenticatedUserId;
+
+            if (isOwner) {
+                tags.push("private");
+            }
+            
+            if (exercise.shared_with_public) {
+                tags.push("public");
+            }
+
+            if (!isOwner && !exercise.shared_with_public) {
+                // If not owned and not public, it must be visible due to family access
+                tags.push("family");
+            }
+
+            return { ...exercise, tags };
+        })
+    );
+    return { exercises: taggedExercises, totalCount };
   } catch (error) {
     log('error', `Error fetching exercises with pagination for user ${authenticatedUserId} and target ${targetUserId}:`, error);
     throw error;
@@ -33,8 +61,28 @@ async function getExercisesWithPagination(authenticatedUserId, targetUserId, sea
 
 async function searchExercises(authenticatedUserId, name, targetUserId, equipmentFilter, muscleGroupFilter) {
   try {
-    const exercises = await exerciseRepository.searchExercises(name, targetUserId, equipmentFilter, muscleGroupFilter);
-    return exercises;
+  const exercises = await exerciseDb.searchExercises(name, targetUserId, equipmentFilter, muscleGroupFilter);
+    const taggedExercises = await Promise.all(
+      exercises.map(async (exercise) => {
+        const tags = [];
+        const isOwner = exercise.user_id === authenticatedUserId;
+
+        if (isOwner) {
+          tags.push("private");
+        }
+
+        if (exercise.shared_with_public) {
+          tags.push("public");
+        }
+
+        if (!isOwner && !exercise.shared_with_public) {
+            tags.push("family");
+        }
+
+        return { ...exercise, tags };
+      })
+    );
+    return taggedExercises;
   } catch (error) {
     log('error', `Error searching exercises for user ${authenticatedUserId} with name "${name}":`, error);
     throw error;
@@ -43,7 +91,7 @@ async function searchExercises(authenticatedUserId, name, targetUserId, equipmen
 
 async function getAvailableEquipment() {
   try {
-    const equipment = await exerciseRepository.getDistinctEquipment();
+  const equipment = await exerciseDb.getDistinctEquipment();
     return equipment;
   } catch (error) {
     log('error', `Error fetching available equipment:`, error);
@@ -53,7 +101,7 @@ async function getAvailableEquipment() {
 
 async function getAvailableMuscleGroups() {
   try {
-    const muscleGroups = await exerciseRepository.getDistinctMuscleGroups();
+  const muscleGroups = await exerciseDb.getDistinctMuscleGroups();
     return muscleGroups;
   } catch (error) {
     log('error', `Error fetching available muscle groups:`, error);
@@ -69,7 +117,7 @@ async function createExercise(authenticatedUserId, exerciseData) {
     if (exerciseData.images && Array.isArray(exerciseData.images)) {
       exerciseData.images = JSON.stringify(exerciseData.images);
     }
-    const newExercise = await exerciseRepository.createExercise(exerciseData);
+  const newExercise = await exerciseDb.createExercise(exerciseData);
     return newExercise;
   } catch (error) {
     log('error', `Error creating exercise for user ${authenticatedUserId}:`, error);
@@ -77,67 +125,86 @@ async function createExercise(authenticatedUserId, exerciseData) {
   }
 }
 
-async function createExerciseEntry(authenticatedUserId, entryData) {
+async function createExerciseEntry(authenticatedUserId, actingUserId, entryData) {
   try {
-    entryData.user_id = authenticatedUserId;
-
     // Resolve exercise_id to a UUID
     const resolvedExerciseId = await resolveExerciseIdToUuid(entryData.exercise_id);
     entryData.exercise_id = resolvedExerciseId;
 
-    // If calories_burned is not provided, calculate it using the calorieCalculationService
-    if (!entryData.calories_burned && entryData.exercise_id && entryData.duration_minutes !== null && entryData.duration_minutes !== undefined) {
-      const exercise = await exerciseRepository.getExerciseById(entryData.exercise_id);
-      if (exercise) {
-        const caloriesPerHour = await calorieCalculationService.estimateCaloriesBurnedPerHour(exercise, authenticatedUserId, entryData.sets);
-        entryData.calories_burned = (caloriesPerHour / 60) * entryData.duration_minutes;
-      } else {
-        log('warn', `Exercise ${entryData.exercise_id} not found. Cannot auto-calculate calories_burned.`);
-        entryData.calories_burned = 0;
-      }
-    } else if (!entryData.calories_burned) {
-      entryData.calories_burned = 0;
+    // Fetch exercise details to create the snapshot
+    const exercise = await exerciseDb.getExerciseById(entryData.exercise_id, authenticatedUserId);
+    if (!exercise) {
+      throw new Error("Exercise not found for snapshot.");
     }
 
-    const newEntry = await exerciseRepository.createExerciseEntry(authenticatedUserId, {
+    // If calories_burned is not provided, calculate it using the calorieCalculationService
+    let calculatedCaloriesBurned = entryData.calories_burned;
+    if (!calculatedCaloriesBurned && entryData.exercise_id && entryData.duration_minutes !== null && entryData.duration_minutes !== undefined) {
+      const caloriesPerHour = await calorieCalculationService.estimateCaloriesBurnedPerHour(exercise, authenticatedUserId, entryData.sets);
+      calculatedCaloriesBurned = (caloriesPerHour / 60) * entryData.duration_minutes;
+    } else if (!calculatedCaloriesBurned) {
+      calculatedCaloriesBurned = 0;
+    }
+
+    // Populate snapshot fields
+    const snapshotEntryData = {
       ...entryData,
+      user_id: authenticatedUserId,
+      created_by_user_id: actingUserId, // Use actingUserId for audit
+      exercise_name: exercise.name,
+      calories_per_hour: exercise.calories_per_hour, // Snapshot the exercise's base calories_per_hour
+      calories_burned: calculatedCaloriesBurned,
       duration_minutes: typeof entryData.duration_minutes === 'number' ? entryData.duration_minutes : 0,
-      sets: entryData.sets || null,
-      reps: entryData.reps || null,
-      weight: entryData.weight || null,
       workout_plan_assignment_id: entryData.workout_plan_assignment_id || null,
       image_url: entryData.image_url || null,
-    });
+      distance: entryData.distance || null,
+      avg_heart_rate: entryData.avg_heart_rate || null,
+    };
+
+  // Use exerciseEntry module to create the entry (handles sets and snapshot inserts)
+  const newEntry = await exerciseEntryDb.createExerciseEntry(authenticatedUserId, snapshotEntryData, actingUserId);
+
+   // If activity_details are provided, create them
+   if (entryData.activity_details && entryData.activity_details.length > 0) {
+     for (const detail of entryData.activity_details) {
+       await activityDetailsRepository.createActivityDetail(authenticatedUserId, {
+         exercise_entry_id: newEntry.id,
+         provider_name: detail.provider_name || 'Manual', // Default to Manual if not provided
+         detail_type: detail.detail_type,
+         detail_data: detail.detail_data,
+         created_by_user_id: actingUserId,
+         updated_by_user_id: actingUserId,
+       });
+     }
+   }
     return newEntry;
   } catch (error) {
-    log('error', `Error creating exercise entry for user ${authenticatedUserId}:`, error);
+    log('error', `Error creating exercise entry for user ${authenticatedUserId} by ${actingUserId}:`, error);
     throw error;
   }
 }
 
 async function getExerciseEntryById(authenticatedUserId, id) {
   try {
-    const entryOwnerId = await exerciseRepository.getExerciseEntryOwnerId(id);
+    const entryOwnerId = await exerciseEntryDb.getExerciseEntryOwnerId(id, authenticatedUserId);
     if (!entryOwnerId) {
       throw new Error('Exercise entry not found.');
     }
-    const entry = await exerciseRepository.getExerciseEntryById(id);
-    return entry;
-  } catch (error) {
-    log('error', `Error fetching exercise entry ${id} by user ${authenticatedUserId}:`, error);
-    throw error;
-  }
-}
+    const entry = await exerciseEntryDb.getExerciseEntryById(id, authenticatedUserId);
+    // Fetch activity details
+    const activityDetails = await activityDetailsRepository.getActivityDetailsByEntryId(authenticatedUserId, id);
+    return { ...entry, activity_details: activityDetails };
+   } catch (error) {
+     log('error', `Error fetching exercise entry ${id} by user ${authenticatedUserId}:`, error);
+     throw error;
+   }
+ }
 
 async function updateExerciseEntry(authenticatedUserId, id, updateData) {
   try {
-    const existingEntry = await exerciseRepository.getExerciseEntryById(id);
+    const existingEntry = await exerciseEntryDb.getExerciseEntryById(id, authenticatedUserId);
     if (!existingEntry) {
       throw new Error('Exercise entry not found.');
-    }
-    // Ensure the authenticated user is the owner of the exercise entry
-    if (existingEntry.user_id !== authenticatedUserId) {
-      throw new Error('Forbidden: You do not have permission to update this exercise entry.');
     }
 
     // If a new image is being uploaded or the image is being cleared, delete the old one
@@ -152,7 +219,7 @@ async function updateExerciseEntry(authenticatedUserId, id, updateData) {
  
     // If calories_burned is not provided, calculate it using the calorieCalculationService
     if (updateData.exercise_id && updateData.duration_minutes !== null && updateData.duration_minutes !== undefined && updateData.calories_burned === undefined) {
-      const exercise = await exerciseRepository.getExerciseById(updateData.exercise_id);
+  const exercise = await exerciseDb.getExerciseById(updateData.exercise_id, authenticatedUserId);
       if (exercise) {
         const caloriesPerHour = await calorieCalculationService.estimateCaloriesBurnedPerHour(exercise, authenticatedUserId, updateData.sets);
         updateData.calories_burned = (caloriesPerHour / 60) * updateData.duration_minutes;
@@ -165,7 +232,7 @@ async function updateExerciseEntry(authenticatedUserId, id, updateData) {
       updateData.calories_burned = existingEntry.calories_burned || 0;
     }
 
-    const updatedEntry = await exerciseRepository.updateExerciseEntry(id, authenticatedUserId, {
+    const updatedEntry = await exerciseEntryDb.updateExerciseEntry(id, authenticatedUserId, {
       ...updateData,
       duration_minutes: updateData.duration_minutes || 0,
       sets: updateData.sets || null,
@@ -173,10 +240,46 @@ async function updateExerciseEntry(authenticatedUserId, id, updateData) {
       weight: updateData.weight || null,
       workout_plan_assignment_id: updateData.workout_plan_assignment_id || null,
       image_url: updateData.image_url === null ? null : (updateData.image_url || existingEntry.image_url),
+      distance: updateData.distance || null,
+      avg_heart_rate: updateData.avg_heart_rate || null,
     });
     if (!updatedEntry) {
       throw new Error('Exercise entry not found or not authorized to update.');
     }
+    // Handle activity details updates
+   if (updateData.activity_details !== undefined) {
+     const existingActivityDetails = await activityDetailsRepository.getActivityDetailsByEntryId(authenticatedUserId, id);
+     const incomingActivityDetails = updateData.activity_details || [];
+
+     // Identify details to delete
+     for (const existingDetail of existingActivityDetails) {
+       const found = incomingActivityDetails.find(
+         (incomingDetail) => incomingDetail.id === existingDetail.id
+       );
+       if (!found) {
+         await activityDetailsRepository.deleteActivityDetail(authenticatedUserId, existingDetail.id);
+       }
+     }
+
+     // Identify details to create or update
+     for (const incomingDetail of incomingActivityDetails) {
+       if (incomingDetail.id) {
+         // Update existing detail
+         await activityDetailsRepository.updateActivityDetail(authenticatedUserId, incomingDetail.id, {
+           ...incomingDetail,
+           updated_by_user_id: authenticatedUserId,
+         });
+       } else {
+         // Create new detail
+         await activityDetailsRepository.createActivityDetail(authenticatedUserId, {
+           ...incomingDetail,
+           exercise_entry_id: id,
+           created_by_user_id: authenticatedUserId,
+           updated_by_user_id: authenticatedUserId,
+         });
+       }
+     }
+   }
     return updatedEntry;
   } catch (error) {
     log('error', `Error updating exercise entry ${id} by ${authenticatedUserId}:`, error);
@@ -186,13 +289,9 @@ async function updateExerciseEntry(authenticatedUserId, id, updateData) {
 
 async function deleteExerciseEntry(authenticatedUserId, id) {
   try {
-    const entry = await exerciseRepository.getExerciseEntryById(id);
+    const entry = await exerciseEntryDb.getExerciseEntryById(id, authenticatedUserId);
     if (!entry) {
       throw new Error('Exercise entry not found.');
-    }
-    // Ensure the authenticated user is the owner of the exercise entry
-    if (entry.user_id !== authenticatedUserId) {
-      throw new Error('Forbidden: You do not have permission to delete this exercise entry.');
     }
 
     // If an image is associated with the entry, delete it from the filesystem
@@ -204,7 +303,7 @@ async function deleteExerciseEntry(authenticatedUserId, id) {
       }
     }
 
-    const success = await exerciseRepository.deleteExerciseEntry(id, authenticatedUserId);
+    const success = await exerciseEntryDb.deleteExerciseEntry(id, authenticatedUserId);
     if (!success) {
       throw new Error('Exercise entry not found or not authorized to delete.');
     }
@@ -217,15 +316,15 @@ async function deleteExerciseEntry(authenticatedUserId, id) {
 
 async function getExerciseById(authenticatedUserId, id) {
   try {
-    const exerciseOwnerId = await exerciseRepository.getExerciseOwnerId(id);
+    const exerciseOwnerId = await exerciseDb.getExerciseOwnerId(id, authenticatedUserId);
     if (!exerciseOwnerId) {
-      const publicExercise = await exerciseRepository.getExerciseById(id);
+      const publicExercise = await exerciseDb.getExerciseById(id);
       if (publicExercise && !publicExercise.is_custom) {
         return publicExercise;
       }
       throw new Error('Exercise not found.');
     }
-    const exercise = await exerciseRepository.getExerciseById(id);
+    const exercise = await exerciseDb.getExerciseById(id, authenticatedUserId);
     return exercise;
   } catch (error) {
     log('error', `Error fetching exercise ${id} by user ${authenticatedUserId}:`, error);
@@ -235,18 +334,15 @@ async function getExerciseById(authenticatedUserId, id) {
 
 async function updateExercise(authenticatedUserId, id, updateData) {
   try {
-    const exerciseOwnerId = await exerciseRepository.getExerciseOwnerId(id);
+    const exerciseOwnerId = await exerciseDb.getExerciseOwnerId(id, authenticatedUserId);
     if (!exerciseOwnerId) {
       throw new Error('Exercise not found.');
-    }
-    if (exerciseOwnerId !== authenticatedUserId) {
-      throw new Error('Forbidden: You do not have permission to update this exercise.');
     }
     // If images are provided, ensure they are stored as JSON string in the database
     if (updateData.images && Array.isArray(updateData.images)) {
       updateData.images = JSON.stringify(updateData.images);
     }
-    const updatedExercise = await exerciseRepository.updateExercise(id, authenticatedUserId, updateData);
+    const updatedExercise = await exerciseDb.updateExercise(id, authenticatedUserId, updateData);
     if (!updatedExercise) {
       throw new Error('Exercise not found or not authorized to update.');
     }
@@ -257,52 +353,75 @@ async function updateExercise(authenticatedUserId, id, updateData) {
   }
 }
 
-async function deleteExercise(authenticatedUserId, id) {
+async function deleteExercise(authenticatedUserId, exerciseId, forceDelete = false) {
+  log("info", `deleteExercise: Attempting to delete exercise ${exerciseId} by user ${authenticatedUserId}. Force delete: ${forceDelete}`);
   try {
-    const exercise = await exerciseRepository.getExerciseById(id); // Get exercise details
-    if (!exercise) {
-      throw new Error('Exercise not found.');
-    }
-    if (exercise.user_id !== authenticatedUserId) {
-      throw new Error('Forbidden: You do not have permission to delete this exercise.');
+    const exerciseOwnerId = await exerciseDb.getExerciseOwnerId(exerciseId, authenticatedUserId);
+    if (!exerciseOwnerId) {
+      log("warn", `deleteExercise: Exercise ${exerciseId} not found for user ${authenticatedUserId}.`);
+      throw new Error("Exercise not found.");
     }
 
-    const success = await exerciseRepository.deleteExercise(id, authenticatedUserId);
-    if (!success) {
-      throw new Error('Exercise not found or not authorized to delete.');
-    }
+  const deletionImpact = await exerciseDb.getExerciseDeletionImpact(exerciseId, authenticatedUserId);
+    log("info", `deleteExercise: Deletion impact for exercise ${exerciseId}: ${JSON.stringify(deletionImpact)}`);
 
-    // Delete associated images and their folder
-    if (exercise.images) {
-      let imagePaths = [];
-      if (Array.isArray(exercise.images)) {
-        imagePaths = exercise.images;
-      } else if (typeof exercise.images === 'string') {
-        try {
-          imagePaths = JSON.parse(exercise.images);
-          if (typeof imagePaths === 'string') { // Handle double-encoded JSON string
-            imagePaths = [imagePaths];
-          }
-        } catch (e) {
-          imagePaths = [exercise.images]; // Treat as a single path string
-        }
+    const {
+      exerciseEntriesCount,
+      workoutPlansCount,
+      workoutPresetsCount,
+      currentUserReferences,
+      otherUserReferences,
+      isPubliclyShared,
+      familySharedUsers,
+    } = deletionImpact;
+
+    const totalReferences = exerciseEntriesCount + workoutPlansCount + workoutPresetsCount;
+
+    // Scenario 1: No references at all
+    if (totalReferences === 0) {
+      log("info", `deleteExercise: Exercise ${exerciseId} has no references. Performing hard delete.`);
+      const success = await exerciseDb.deleteExerciseAndDependencies(exerciseId, authenticatedUserId);
+      if (!success) {
+        throw new Error("Exercise not found or not authorized to delete.");
       }
+      return { message: "Exercise deleted permanently.", status: "deleted" };
+    }
 
-      if (imagePaths.length > 0 && imagePaths[0]) {
-        // Assuming all images for an exercise are in the same folder
-        const folderName = imagePaths[0].split('/')[0];
-        const exerciseUploadPath = path.join(__dirname, '../uploads/exercises', folderName);
-
-        if (fs.existsSync(exerciseUploadPath)) {
-          fs.rmSync(exerciseUploadPath, { recursive: true, force: true });
-          log('info', `Deleted exercise image folder: ${exerciseUploadPath}`);
+    // Scenario 2: References only by the current user
+    if (otherUserReferences === 0) {
+      if (forceDelete) {
+        log("info", `deleteExercise: Exercise ${exerciseId} has references only by current user. Force deleting.`);
+        const success = await exerciseDb.deleteExerciseAndDependencies(exerciseId, authenticatedUserId);
+        if (!success) {
+          throw new Error("Exercise not found or not authorized to delete.");
         }
+        return { message: "Exercise and all its references deleted permanently.", status: "force_deleted" };
+      } else {
+        // Hide the exercise (mark as quick/hidden) so it won't appear in searches but existing references remain
+        log("info", `deleteExercise: Exercise ${exerciseId} has references only by current user. Hiding as quick exercise.`);
+        await exerciseDb.updateExercise(exerciseId, exerciseOwnerId, { is_quick_exercise: true });
+        return { message: "Exercise hidden (marked as quick exercise). Existing references remain.", status: "hidden" };
       }
     }
 
-    return { message: 'Exercise deleted successfully.' };
+    // Scenario 3: References by other users
+    if (otherUserReferences > 0) {
+        // If other users reference this exercise, hide it (mark as quick exercise) so it's removed from searches
+        log("info", `deleteExercise: Exercise ${exerciseId} has references by other users. Hiding as quick exercise.`);
+        await exerciseDb.updateExercise(exerciseId, exerciseOwnerId, { is_quick_exercise: true });
+        return { message: "Exercise hidden (marked as quick exercise). Existing references remain.", status: "hidden" };
+    }
+
+    // Fallback for any unhandled cases (should not be reached)
+    log("warn", `deleteExercise: Unhandled deletion scenario for exercise ${exerciseId}.`);
+    throw new Error("Could not delete exercise due to an unknown issue.");
+
   } catch (error) {
-    log('error', `Error deleting exercise ${id} by ${authenticatedUserId}:`, error);
+    log(
+      "error",
+      `Error deleting exercise ${exerciseId} by user ${authenticatedUserId} in exerciseService:`,
+      error
+    );
     throw error;
   }
 }
@@ -313,11 +432,20 @@ async function getExerciseEntriesByDate(authenticatedUserId, targetUserId, selec
       log('error', 'getExerciseEntriesByDate: targetUserId is undefined. Returning empty array.');
       return [];
     }
-    const entries = await exerciseRepository.getExerciseEntriesByDate(targetUserId, selectedDate);
+  // Use the exerciseEntryDb directly to avoid circular dependency where exerciseRepository
+  // may not have fully exported its properties yet at runtime.
+  const entries = await exerciseEntryDb.getExerciseEntriesByDate(targetUserId, selectedDate);
     if (!entries || entries.length === 0) {
       return [];
     }
-    return entries;
+
+    // For each entry, fetch and attach its activity details
+    const entriesWithDetails = await Promise.all(entries.map(async (entry) => {
+      const activityDetails = await activityDetailsRepository.getActivityDetailsByEntryId(authenticatedUserId, entry.id);
+      return { ...entry, activity_details: activityDetails };
+    }));
+
+    return entriesWithDetails;
   } catch (error) {
     log('error', `Error fetching exercise entries for user ${targetUserId} on ${selectedDate} by ${authenticatedUserId}:`, error);
     throw error;
@@ -326,7 +454,7 @@ async function getExerciseEntriesByDate(authenticatedUserId, targetUserId, selec
 
 async function getOrCreateActiveCaloriesExercise(userId) {
   try {
-    const exerciseId = await exerciseRepository.getOrCreateActiveCaloriesExercise(userId);
+    const exerciseId = await exerciseDb.getOrCreateActiveCaloriesExercise(userId);
     return exerciseId;
   } catch (error) {
     log('error', `Error getting or creating active calories exercise for user ${userId}:`, error);
@@ -336,7 +464,7 @@ async function getOrCreateActiveCaloriesExercise(userId) {
 
 async function upsertExerciseEntryData(userId, exerciseId, caloriesBurned, date) {
   try {
-    const entry = await exerciseRepository.upsertExerciseEntryData(userId, exerciseId, caloriesBurned, date);
+    const entry = await exerciseEntryDb.upsertExerciseEntryData(userId, exerciseId, caloriesBurned, date);
     return entry;
   } catch (error) {
     log('error', `Error upserting exercise entry data for user ${userId}, exercise ${exerciseId}:`, error);
@@ -521,7 +649,7 @@ async function addExternalExerciseToUserExercises(authenticatedUserId, wgerExerc
 
     log('info', `Mapped exercise data before insert: ${JSON.stringify(exerciseData, null, 2)}`);
 
-    const newExercise = await exerciseRepository.createExercise(exerciseData);
+  const newExercise = await exerciseDb.createExercise(exerciseData);
     return newExercise;
   } catch (error) {
     log('error', `Error adding external exercise ${wgerExerciseId} for user ${authenticatedUserId}:`, error);
@@ -546,7 +674,7 @@ async function addNutritionixExerciseToUserExercises(authenticatedUserId, nutrit
       source: 'nutritionix',
     };
 
-    const newExercise = await exerciseRepository.createExercise(exerciseData);
+  const newExercise = await exerciseDb.createExercise(exerciseData);
     return newExercise;
   } catch (error) {
     log('error', `Error adding Nutritionix exercise for user ${authenticatedUserId}:`, error);
@@ -595,7 +723,7 @@ async function addFreeExerciseDBExerciseToUserExercises(authenticatedUserId, fre
       shared_with_public: false, // Imported exercises are private by default
     };
 
-    const newExercise = await exerciseRepository.createExercise(exerciseData);
+  const newExercise = await exerciseDb.createExercise(exerciseData);
     return newExercise;
   } catch (error) {
     log('error', `Error adding Free-Exercise-DB exercise ${freeExerciseDBId} for user ${authenticatedUserId}:`, error);
@@ -607,8 +735,8 @@ async function getSuggestedExercises(authenticatedUserId, limit) {
   try {
     const preferences = await preferenceRepository.getUserPreferences(authenticatedUserId);
     const displayLimit = preferences?.item_display_limit || limit;
-    const recentExercises = await exerciseRepository.getRecentExercises(authenticatedUserId, displayLimit);
-    const topExercises = await exerciseRepository.getTopExercises(authenticatedUserId, displayLimit);
+  const recentExercises = await exerciseDb.getRecentExercises(authenticatedUserId, displayLimit);
+  const topExercises = await exerciseDb.getTopExercises(authenticatedUserId, displayLimit);
     return { recentExercises, topExercises };
   } catch (error) {
     log('error', `Error fetching suggested exercises for user ${authenticatedUserId}:`, error);
@@ -620,8 +748,28 @@ async function getRecentExercises(authenticatedUserId, limit) {
   try {
     const preferences = await preferenceRepository.getUserPreferences(authenticatedUserId);
     const displayLimit = preferences?.item_display_limit || limit;
-    const recentExercises = await exerciseRepository.getRecentExercises(authenticatedUserId, displayLimit);
-    return recentExercises;
+  const recentExercises = await exerciseDb.getRecentExercises(authenticatedUserId, displayLimit);
+    const taggedExercises = await Promise.all(
+      recentExercises.map(async (exercise) => {
+        const tags = [];
+        const isOwner = exercise.user_id === authenticatedUserId;
+
+        if (isOwner) {
+          tags.push("private");
+        }
+        
+        if (exercise.shared_with_public) {
+          tags.push("public");
+        }
+
+        if (!isOwner && !exercise.shared_with_public) {
+            tags.push("family");
+        }
+
+        return { ...exercise, tags };
+      })
+    );
+    return taggedExercises;
   } catch (error) {
     log('error', `Error fetching recent exercises for user ${authenticatedUserId}:`, error);
     throw error;
@@ -632,8 +780,28 @@ async function getTopExercises(authenticatedUserId, limit) {
   try {
     const preferences = await preferenceRepository.getUserPreferences(authenticatedUserId);
     const displayLimit = preferences?.item_display_limit || limit;
-    const topExercises = await exerciseRepository.getTopExercises(authenticatedUserId, displayLimit);
-    return topExercises;
+  const topExercises = await exerciseDb.getTopExercises(authenticatedUserId, displayLimit);
+    const taggedExercises = await Promise.all(
+      topExercises.map(async (exercise) => {
+        const tags = [];
+        const isOwner = exercise.user_id === authenticatedUserId;
+
+        if (isOwner) {
+          tags.push("private");
+        }
+        
+        if (exercise.shared_with_public) {
+          tags.push("public");
+        }
+
+        if (!isOwner && !exercise.shared_with_public) {
+            tags.push("family");
+        }
+
+        return { ...exercise, tags };
+      })
+    );
+    return taggedExercises;
   } catch (error) {
     log('error', `Error fetching top exercises for user ${authenticatedUserId}:`, error);
     throw error;
@@ -642,7 +810,8 @@ async function getTopExercises(authenticatedUserId, limit) {
 
 async function getExerciseProgressData(authenticatedUserId, exerciseId, startDate, endDate) {
   try {
-    const progressData = await exerciseRepository.getExerciseProgressData(authenticatedUserId, exerciseId, startDate, endDate);
+    // getExerciseProgressData is implemented in the exerciseEntry module
+    const progressData = await exerciseEntryDb.getExerciseProgressData(authenticatedUserId, exerciseId, startDate, endDate);
     return progressData;
   } catch (error) {
     log('error', `Error fetching exercise progress data for user ${authenticatedUserId}, exercise ${exerciseId}:`, error);
@@ -653,7 +822,8 @@ async function getExerciseProgressData(authenticatedUserId, exerciseId, startDat
 async function getExerciseHistory(authenticatedUserId, exerciseId, limit) {
   try {
     const resolvedExerciseId = await resolveExerciseIdToUuid(exerciseId);
-    const history = await exerciseRepository.getExerciseHistory(authenticatedUserId, resolvedExerciseId, limit);
+    // getExerciseHistory is implemented in the exerciseEntry module
+    const history = await exerciseEntryDb.getExerciseHistory(authenticatedUserId, resolvedExerciseId, limit);
     return history;
   } catch (error) {
     log('error', `Error fetching exercise history for user ${authenticatedUserId}, exercise ${exerciseId}:`, error);
@@ -734,13 +904,13 @@ async function importExercisesFromCSV(authenticatedUserId, filePath) {
           exerciseData.images = [];
         }
 
-        const existingExercise = await exerciseRepository.searchExercises(exerciseName, authenticatedUserId, [], []);
+        const existingExercise = await exerciseDb.searchExercises(exerciseName, authenticatedUserId, [], []);
         if (existingExercise && existingExercise.length > 0) {
           // Assuming the first match is the one to update
-          await exerciseRepository.updateExercise(existingExercise[0].id, authenticatedUserId, exerciseData);
+          await exerciseDb.updateExercise(existingExercise[0].id, authenticatedUserId, exerciseData);
           updatedCount++;
         } else {
-          await exerciseRepository.createExercise(exerciseData);
+          await exerciseDb.createExercise(exerciseData);
           createdCount++;
         }
       } catch (rowError) {
@@ -768,19 +938,24 @@ async function importExercisesFromCSV(authenticatedUserId, filePath) {
   };
 }
  
-async function getExerciseDeletionImpact(exerciseId) {
-    const client = await getPool().connect();
-    try {
-        const result = await client.query(
-            'SELECT COUNT(*) FROM exercise_entries WHERE exercise_id = $1',
-            [exerciseId]
-        );
-        return {
-            exerciseEntriesCount: parseInt(result.rows[0].count, 10),
-        };
-    } finally {
-        client.release();
+async function getExerciseDeletionImpact(authenticatedUserId, exerciseId) {
+  log("info", `getExerciseDeletionImpact: Checking deletion impact for exercise ${exerciseId} by user ${authenticatedUserId}`);
+  try {
+  const exerciseOwnerId = await exerciseDb.getExerciseOwnerId(exerciseId, authenticatedUserId);
+    if (!exerciseOwnerId) {
+      log("warn", `getExerciseDeletionImpact: Exercise ${exerciseId} not found for user ${authenticatedUserId}.`);
+      throw new Error("Exercise not found.");
     }
+    // No need to check permission here, as exerciseRepository.getExerciseDeletionImpact handles it
+  return await exerciseDb.getExerciseDeletionImpact(exerciseId, authenticatedUserId);
+  } catch (error) {
+    log(
+      "error",
+      `Error getting exercise deletion impact for exercise ${exerciseId} by user ${authenticatedUserId} in exerciseService:`,
+      error
+    );
+    throw error;
+  }
 }
 
 module.exports = {
@@ -811,15 +986,54 @@ module.exports = {
   getTopExercises,
   importExercisesFromCSV,
   importExercisesFromJson, // Export the new function
+  getExercisesNeedingReview, // New export
+  updateExerciseEntriesSnapshot, // New export
 };
 
+async function getExercisesNeedingReview(authenticatedUserId) {
+  try {
+  const exercisesNeedingReview = await exerciseDb.getExercisesNeedingReview(authenticatedUserId);
+    return exercisesNeedingReview;
+  } catch (error) {
+    log("error", `Error getting exercises needing review for user ${authenticatedUserId}:`, error);
+    throw error;
+  }
+}
+
+async function updateExerciseEntriesSnapshot(authenticatedUserId, exerciseId) {
+  try {
+    // Fetch the latest exercise details
+    const exercise = await exerciseDb.getExerciseById(exerciseId, authenticatedUserId);
+    if (!exercise) {
+      throw new Error("Exercise not found.");
+    }
+
+    // Construct the new snapshot data
+    const newSnapshotData = {
+      exercise_name: exercise.name,
+      calories_per_hour: exercise.calories_per_hour,
+    };
+
+    // Update all relevant exercise entries for the authenticated user
+  await exerciseDb.updateExerciseEntriesSnapshot(authenticatedUserId, exerciseId, newSnapshotData);
+
+    // Clear any ignored updates for this exercise for this user
+  await exerciseDb.clearUserIgnoredUpdate(authenticatedUserId, exerciseId);
+
+    return { message: "Exercise entries updated successfully." };
+  } catch (error) {
+    log("error", `Error updating exercise entries snapshot for user ${authenticatedUserId}, exercise ${exerciseId}:`, error);
+    throw error;
+  }
+}
+ 
 async function importExercisesFromJson(authenticatedUserId, exercisesArray) {
   let createdCount = 0;
   let updatedCount = 0;
   let failedCount = 0;
   const failedRows = [];
   const duplicates = [];
-
+ 
   for (const exerciseData of exercisesArray) {
     try {
       const exerciseName = exerciseData.name ? exerciseData.name.trim() : null;
@@ -828,14 +1042,14 @@ async function importExercisesFromJson(authenticatedUserId, exercisesArray) {
         failedRows.push({ row: exerciseData, reason: 'Exercise name is required.' });
         continue;
       }
-
+ 
       const primaryMuscles = exerciseData.primary_muscles ? exerciseData.primary_muscles.split(',').map(m => m.trim()) : [];
       if (primaryMuscles.length === 0) {
         failedCount++;
         failedRows.push({ row: exerciseData, reason: 'Primary muscles are required.' });
         continue;
       }
-
+ 
       const sourceId = exerciseName.toLowerCase().replace(/\s/g, '_');
       const newExerciseData = {
         name: exerciseName,
@@ -855,7 +1069,7 @@ async function importExercisesFromJson(authenticatedUserId, exercisesArray) {
         source: 'CSV_Import', // Indicate that it came from a CSV import via the UI
         source_id: sourceId,
       };
-
+ 
       // Handle images: download and store local paths
       if (exerciseData.images) {
         const imageUrls = exerciseData.images.split(',').map(url => url.trim());
@@ -874,8 +1088,8 @@ async function importExercisesFromJson(authenticatedUserId, exercisesArray) {
       } else {
         newExerciseData.images = [];
       }
-
-      const existingExercise = await exerciseRepository.searchExercises(exerciseName, authenticatedUserId, [], []);
+ 
+      const existingExercise = await exerciseDb.searchExercises(exerciseName, authenticatedUserId, [], []);
       if (existingExercise && existingExercise.length > 0) {
         // Check for exact duplicate before updating
         const isDuplicate = existingExercise.some(
@@ -890,10 +1104,10 @@ async function importExercisesFromJson(authenticatedUserId, exercisesArray) {
         }
 
         // Assuming the first match is the one to update
-        await exerciseRepository.updateExercise(existingExercise[0].id, authenticatedUserId, newExerciseData);
+        await exerciseDb.updateExercise(existingExercise[0].id, authenticatedUserId, newExerciseData);
         updatedCount++;
       } else {
-        await exerciseRepository.createExercise(newExerciseData);
+        await exerciseDb.createExercise(newExerciseData);
         createdCount++;
       }
     } catch (rowError) {
@@ -902,14 +1116,14 @@ async function importExercisesFromJson(authenticatedUserId, exercisesArray) {
       log('error', `Error processing exercise data for user ${authenticatedUserId}:`, rowError);
     }
   }
-
+ 
   if (duplicates.length > 0) {
     const error = new Error('Duplicate exercises found.');
     error.status = 409; // Conflict
     error.data = { duplicates };
     throw error;
   }
-
+ 
   return {
     message: 'Exercise import complete.',
     created: createdCount,

@@ -663,7 +663,6 @@ const Reports = () => {
                   {customCategories.filter(c => c.data_type === 'numeric').map((category) => {
                     const data = customMeasurementsData[category.id] || [];
                     const chartData = formatCustomChartData(category, data);
-                    console.log("chartData", chartData);
                     
                     return (
                       <ZoomableChart key={category.id} title={`${category.name} (${category.measurement_type})`}>
@@ -683,14 +682,13 @@ const Reports = () => {
                                 <CartesianGrid strokeDasharray="3 3" />
                                 <XAxis dataKey="date" />
                                 <YAxis
+                                  type="number"
                                   domain={getCustomYAxisDomain(chartData) || undefined}
-                                  label={{
-                                    value: category.measurement_type.toLowerCase() === 'length' || category.measurement_type.toLowerCase() === 'distance'
-                                      ? (defaultMeasurementUnit)
-                                      : category.measurement_type,
-                                    angle: -90,
-                                    position: 'insideLeft',
-                                    offset: 10
+                                  tickFormatter={(value) => {
+                                    if (category.measurement_type.toLowerCase() === 'waist') {
+                                      return value.toFixed(1);
+                                    }
+                                    return value.toFixed(2);
                                   }}
                                 />
                                 <Tooltip

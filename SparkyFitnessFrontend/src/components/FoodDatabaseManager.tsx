@@ -11,6 +11,12 @@ import {
   DialogTrigger,
   DialogDescription,
 } from "@/components/ui/dialog";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import ConfirmationDialog from "@/components/ui/ConfirmationDialog";
 import {
   Select,
@@ -35,12 +41,14 @@ import {
   Share2,
   Users,
   Filter,
+  Lock,
 } from "lucide-react";
 import { useActiveUser } from "@/contexts/ActiveUserContext";
 import { useAuth } from "@/hooks/useAuth";
 import { usePreferences } from "@/contexts/PreferencesContext";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { toast } from "@/hooks/use-toast";
+import { info } from "@/utils/logging"; // Import the info function
 import EnhancedCustomFoodForm from "./EnhancedCustomFoodForm";
 import FoodSearchDialog from "./FoodSearchDialog";
 import FoodUnitSelector from "./FoodUnitSelector"; // Import FoodUnitSelector
@@ -56,14 +64,41 @@ import { Food, FoodVariant, FoodDeletionImpact } from "@/types/food";
 import MealManagement from "./MealManagement"; // Import MealManagement
 import MealPlanCalendar from "./MealPlanCalendar"; // Import MealPlanCalendar
 
+const nutrientDetails: {
+  [key: string]: { color: string; label: string; unit: string };
+} = {
+  calories: {
+    color: "text-gray-900 dark:text-gray-100",
+    label: "cal",
+    unit: "",
+  },
+  protein: { color: "text-blue-600", label: "protein", unit: "g" },
+  carbs: { color: "text-orange-600", label: "carbs", unit: "g" },
+  fat: { color: "text-yellow-600", label: "fat", unit: "g" },
+  dietary_fiber: { color: "text-green-600", label: "fiber", unit: "g" },
+  sugar: { color: "text-pink-500", label: "sugar", unit: "g" },
+  sodium: { color: "text-purple-500", label: "sodium", unit: "mg" },
+  cholesterol: { color: "text-indigo-500", label: "cholesterol", unit: "mg" },
+  saturated_fat: { color: "text-red-500", label: "sat fat", unit: "g" },
+  trans_fat: { color: "text-red-700", label: "trans fat", unit: "g" },
+  potassium: { color: "text-teal-500", label: "potassium", unit: "mg" },
+  vitamin_a: { color: "text-yellow-400", label: "vit a", unit: "mcg" },
+  vitamin_c: { color: "text-orange-400", label: "vit c", unit: "mg" },
+  iron: { color: "text-gray-500", label: "iron", unit: "mg" },
+  calcium: { color: "text-blue-400", label: "calcium", unit: "mg" },
+  glycemic_index: { color: "text-purple-600", label: "GI", unit: "" },
+};
+
 const FoodDatabaseManager: React.FC = () => {
   const { user } = useAuth();
   const { activeUserId } = useActiveUser();
-  const { nutrientDisplayPreferences } = usePreferences();
+  const { nutrientDisplayPreferences, loggingLevel } = usePreferences();
   const isMobile = useIsMobile();
   const platform = isMobile ? "mobile" : "desktop";
   const quickInfoPreferences = nutrientDisplayPreferences.find(
     (p) => p.view_group === "quick_info" && p.platform === platform,
+  ) || nutrientDisplayPreferences.find(
+    (p) => p.view_group === "quick_info" && p.platform === "desktop",
   );
   const visibleNutrients = quickInfoPreferences
     ? quickInfoPreferences.visible_nutrients
@@ -160,30 +195,31 @@ const FoodDatabaseManager: React.FC = () => {
       setDeletionImpact(impact);
       setFoodToDelete(food);
       setShowDeleteConfirmation(true);
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error fetching deletion impact:", error);
       toast({
         title: "Error",
-        description: "Could not fetch deletion impact. Please try again.",
+        description: error.message || "Could not fetch deletion impact. Please try again.",
         variant: "destructive",
       });
     }
   };
 
-  const confirmDelete = async () => {
+  const confirmDelete = async (force: boolean = false) => {
     if (!foodToDelete || !activeUserId) return;
+    info(loggingLevel, `confirmDelete called with force: ${force}`);
     try {
-      await deleteFoodService(foodToDelete.id, activeUserId);
+      const result = await deleteFoodService(foodToDelete.id, activeUserId, force);
       toast({
         title: "Success",
-        description: "Food deleted successfully.",
+        description: result.message, // Use the message from the backend
       });
       fetchFoodsData();
-    } catch (error) {
+    } catch (error: any) { // Add type annotation for error
       console.error("Error deleting food:", error);
       toast({
         title: "Error",
-        description: "Failed to delete food.",
+        description: error.message || "Failed to delete food.", // Use error message from backend if available
         variant: "destructive",
       });
     } finally {
@@ -276,30 +312,22 @@ const FoodDatabaseManager: React.FC = () => {
     if (food.user_id === user?.id) {
       return (
         <Badge variant="secondary" className="text-xs w-fit">
-          Your Food
+          Private
         </Badge>
       );
     }
 
-    if (food.shared_with_public) {
+    if (food.user_id !== user?.id && !food.shared_with_public) {
       return (
         <Badge
           variant="outline"
-          className="text-xs w-fit bg-green-50 text-green-700"
+          className="text-xs w-fit bg-blue-50 text-blue-700"
         >
-          Public
+          Family
         </Badge>
       );
     }
-
-    return (
-      <Badge
-        variant="outline"
-        className="text-xs w-fit bg-blue-50 text-blue-700"
-      >
-        Family
-      </Badge>
-    );
+    return null; // No badge from getFoodSourceBadge if it's public and not owned by user
   };
 
   const getFilterTitle = () => {
@@ -312,6 +340,8 @@ const FoodDatabaseManager: React.FC = () => {
         return `Family Foods (${totalCount})`;
       case "public":
         return `Public Foods (${totalCount})`;
+      case "needs-review":
+        return `Foods Needing Review (${totalCount})`;
       default:
         return `Foods (${totalCount})`;
     }
@@ -327,6 +357,8 @@ const FoodDatabaseManager: React.FC = () => {
         return "No family foods found";
       case "public":
         return "No public foods found";
+      case "needs-review":
+        return "No foods need your review";
       default:
         return "No foods found";
     }
@@ -379,6 +411,7 @@ const FoodDatabaseManager: React.FC = () => {
                     <SelectItem value="mine">My Foods</SelectItem>
                     <SelectItem value="family">Family</SelectItem>
                     <SelectItem value="public">Public</SelectItem>
+                    <SelectItem value="needs-review">Needs Review</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -444,10 +477,7 @@ const FoodDatabaseManager: React.FC = () => {
                         <div className="flex flex-col sm:flex-row sm:items-center gap-2 mb-1">
                           <span className="font-medium">{food.name}</span>
                           {food.brand && (
-                            <Badge
-                              variant="secondary"
-                              className="text-xs w-fit"
-                            >
+                            <Badge variant="secondary" className="text-xs w-fit">
                               {food.brand}
                             </Badge>
                           )}
@@ -462,64 +492,103 @@ const FoodDatabaseManager: React.FC = () => {
                             </Badge>
                           )}
                         </div>
-                        <div
-                          className={`grid grid-cols-${visibleNutrients.length} gap-2 sm:gap-4 text-xs sm:text-sm text-gray-600 dark:text-gray-400`}
-                        >
-                          {visibleNutrients.map((nutrient) => (
-                            <div key={nutrient}>
-                              <span className="font-medium">
-                                {(food.default_variant?.[
-                                  nutrient as keyof FoodVariant
-                                ] as number) || 0}
-                              </span>{" "}
-                              {nutrient.replace(/_/g, " ")}
-                            </div>
-                          ))}
-                        </div>
-                        <div className="text-xs text-gray-500 mt-1">
+                        <div className="text-xs text-gray-500">
                           Per {food.default_variant?.serving_size || 0}{" "}
                           {food.default_variant?.serving_unit || ""}
                         </div>
                       </div>
-                      {canEdit(food) && (
-                        <div className="flex items-center space-x-2">
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() =>
-                              handleShareFood(
-                                food.id,
-                                food.shared_with_public || false,
-                              )
-                            }
-                            title={
-                              food.shared_with_public
-                                ? "Make private"
-                                : "Share with public"
-                            }
-                          >
-                            {food.shared_with_public ? (
-                              <Users className="w-4 h-4" />
-                            ) : (
-                              <Share2 className="w-4 h-4" />
-                            )}
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => handleEdit(food)}
-                          >
-                            <Edit className="w-4 h-4" />
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => handleDeleteRequest(food)}
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </Button>
+                      <div className="flex items-center space-x-2">
+                        <div className={`grid grid-flow-col-dense gap-x-4 text-xs sm:text-sm text-gray-600 dark:text-gray-400`}>
+                          {visibleNutrients.map((nutrient) => {
+                            const details = nutrientDetails[nutrient];
+                            if (!details) return null;
+                            const value = (food.default_variant?.[nutrient as keyof FoodVariant] as number) || 0;
+                            return (
+                              <div key={nutrient} className="whitespace-nowrap">
+                                <span className={`font-medium ${details.color}`}>
+                                  {typeof value === 'number' ? value.toFixed(nutrient === "calories" ? 0 : 1) : value}
+                                  {details.unit}
+                                </span>{" "}
+                                {details.label}
+                              </div>
+                            );
+                          })}
                         </div>
-                      )}
+                        {/* Action Buttons */}
+                        <div className="flex items-center space-x-2 justify-end">
+                          {/* Share/Lock Button */}
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() =>
+                                    handleShareFood(
+                                      food.id,
+                                      food.shared_with_public || false,
+                                    )
+                                  }
+                                  disabled={!canEdit(food)} // Disable if not editable
+                                >
+                                  {food.shared_with_public ? (
+                                    <Share2 className="w-4 h-4" />
+                                  ) : (
+                                    <Lock className="w-4 h-4" />
+                                  )}
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                <p>
+                                  {canEdit(food)
+                                    ? food.shared_with_public
+                                      ? "Make private"
+                                      : "Share with public"
+                                    : "Not editable"}
+                                </p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+
+                          {/* Edit Button */}
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => handleEdit(food)}
+                                  disabled={!canEdit(food)} // Disable if not editable
+                                >
+                                  <Edit className="w-4 h-4" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                <p>{canEdit(food) ? "Edit food" : "Not editable"}</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+
+                          {/* Delete Button */}
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  onClick={() => handleDeleteRequest(food)}
+                                  disabled={!canEdit(food)} // Disable if not editable
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                <p>{canEdit(food) ? "Delete food" : "Not editable"}</p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        </div>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -637,16 +706,13 @@ const FoodDatabaseManager: React.FC = () => {
       )}
 
       {deletionImpact && foodToDelete && (
-        <ConfirmationDialog
-          open={showDeleteConfirmation}
-          onOpenChange={setShowDeleteConfirmation}
-          onConfirm={confirmDelete}
-          title={`Delete ${foodToDelete.name}?`}
-          description={
+        <Dialog open={showDeleteConfirmation} onOpenChange={setShowDeleteConfirmation}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Delete {foodToDelete.name}?</DialogTitle>
+            </DialogHeader>
             <div>
-              <p>
-                This will permanently delete the food and all associated data:
-              </p>
+              <p>This food is used in:</p>
               <ul className="list-disc pl-5 mt-2">
                 <li>{deletionImpact.foodEntriesCount} diary entries</li>
                 <li>{deletionImpact.mealFoodsCount} meal components</li>
@@ -656,9 +722,36 @@ const FoodDatabaseManager: React.FC = () => {
                   template entries
                 </li>
               </ul>
+              {deletionImpact.otherUserReferences > 0 && (
+                <div className="mt-4 p-4 bg-yellow-100 text-yellow-800 rounded-md">
+                  <p className="font-bold">Warning!</p>
+                  <p>This food is used by other users. You can only hide it. Hiding will prevent other users from adding this food in the future, but it will not affect their existing history, meals, or meal plans.</p>
+                </div>
+              )}
             </div>
-          }
-        />
+            <div className="flex justify-end space-x-2 mt-4">
+              <Button variant="outline" onClick={() => setShowDeleteConfirmation(false)}>
+                Cancel
+              </Button>
+              {deletionImpact.totalReferences === 0 ? (
+                <Button variant="destructive" onClick={() => confirmDelete(true)}>
+                  Delete
+                </Button>
+              ) : deletionImpact.otherUserReferences > 0 ? (
+                <Button onClick={() => confirmDelete(false)}>Hide</Button>
+              ) : (
+                <>
+                  <Button variant="outline" onClick={() => confirmDelete(false)}>
+                    Hide
+                  </Button>
+                  <Button variant="destructive" onClick={() => confirmDelete(true)}>
+                    Force Delete
+                  </Button>
+                </>
+              )}
+            </div>
+          </DialogContent>
+        </Dialog>
       )}
 
       <FoodSearchDialog

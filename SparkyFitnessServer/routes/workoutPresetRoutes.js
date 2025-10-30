@@ -1,10 +1,10 @@
 const express = require('express');
 const router = express.Router();
-const { authenticateToken, authorizeAccess } = require('../middleware/authMiddleware');
+const { authenticate } = require('../middleware/authMiddleware');
 const workoutPresetService = require('../services/workoutPresetService');
 
 // Create a new workout preset
-router.post('/', authenticateToken, authorizeAccess('exercise_list'), async (req, res, next) => {
+router.post('/', authenticate, async (req, res, next) => {
   try {
     const newPreset = await workoutPresetService.createWorkoutPreset(req.userId, req.body);
     res.status(201).json(newPreset);
@@ -14,9 +14,11 @@ router.post('/', authenticateToken, authorizeAccess('exercise_list'), async (req
 });
 
 // Get all workout presets for the authenticated user
-router.get('/', authenticateToken, authorizeAccess('exercise_list'), async (req, res, next) => {
+router.get('/', authenticate, async (req, res, next) => {
   try {
-    const presets = await workoutPresetService.getWorkoutPresets(req.userId);
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 10;
+    const presets = await workoutPresetService.getWorkoutPresets(req.userId, page, limit);
     res.status(200).json(presets);
   } catch (error) {
     next(error);
@@ -24,7 +26,7 @@ router.get('/', authenticateToken, authorizeAccess('exercise_list'), async (req,
 });
 
 // Get a specific workout preset by ID
-router.get('/:id', authenticateToken, authorizeAccess('exercise_list'), async (req, res, next) => {
+router.get('/:id', authenticate, async (req, res, next) => {
   try {
     const preset = await workoutPresetService.getWorkoutPresetById(req.userId, req.params.id);
     res.status(200).json(preset);
@@ -40,7 +42,7 @@ router.get('/:id', authenticateToken, authorizeAccess('exercise_list'), async (r
 });
 
 // Update an existing workout preset
-router.put('/:id', authenticateToken, authorizeAccess('exercise_list'), async (req, res, next) => {
+router.put('/:id', authenticate, async (req, res, next) => {
   try {
     const updatedPreset = await workoutPresetService.updateWorkoutPreset(req.userId, req.params.id, req.body);
     res.status(200).json(updatedPreset);
@@ -56,7 +58,7 @@ router.put('/:id', authenticateToken, authorizeAccess('exercise_list'), async (r
 });
 
 // Delete a workout preset
-router.delete('/:id', authenticateToken, authorizeAccess('exercise_list'), async (req, res, next) => {
+router.delete('/:id', authenticate, async (req, res, next) => {
   try {
     const result = await workoutPresetService.deleteWorkoutPreset(req.userId, req.params.id);
     res.status(200).json(result);
@@ -72,9 +74,10 @@ router.delete('/:id', authenticateToken, authorizeAccess('exercise_list'), async
 });
 
 // Search workout presets
-router.get('/search', authenticateToken, authorizeAccess('exercise_list'), async (req, res, next) => {
+router.get('/search', authenticate, async (req, res, next) => {
   try {
-    const { searchTerm, limit } = req.query;
+    const { searchTerm } = req.query;
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : null;
     const presets = await workoutPresetService.searchWorkoutPresets(searchTerm, req.userId, limit);
     res.status(200).json(presets);
   } catch (error) {

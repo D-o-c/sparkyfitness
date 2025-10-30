@@ -43,9 +43,9 @@ const OidcSettings: React.FC = () => {
       token_endpoint_auth_method: 'client_secret_post',
       response_types: ['code'],
       is_active: true,
-      id_token_signed_response_alg: 'RS256',
-      userinfo_signed_response_alg: 'none',
-      request_timeout: 30000,
+      signing_algorithm: 'RS256',
+      profile_signing_algorithm: 'none',
+      timeout: 30000,
       auto_register: false,
     });
     setIsDialogOpen(true);
@@ -173,9 +173,9 @@ const ProviderDialog: React.FC<{ provider: OidcProvider; onSave: (provider: Oidc
       scope: 'openid profile email',
       token_endpoint_auth_method: 'client_secret_post',
       response_types: ['code'],
-      id_token_signed_response_alg: 'RS256',
-      userinfo_signed_response_alg: 'none',
-      request_timeout: 30000,
+      signing_algorithm: 'RS256',
+      profile_signing_algorithm: 'none',
+      timeout: 30000,
     }));
     toast({ title: "Defaults Restored", description: "OIDC provider fields have been reset to their default values." });
   };
@@ -265,24 +265,51 @@ const ProviderDialog: React.FC<{ provider: OidcProvider; onSave: (provider: Oidc
               </div>
               <div>
                 <Label htmlFor="redirect_uris">Redirect URI</Label>
-                <Input id="redirect_uris" value={editedProvider.redirect_uris.join(', ')} onChange={handleChange} placeholder="e.g., https://app.example.com/oidc-callback" />
+                <Input id="redirect_uris" value={editedProvider.redirect_uris.join(', ')} onChange={handleChange} placeholder={`e.g., ${window.location.origin}/oidc-callback`} />
               </div>
               <div>
-                <Label htmlFor="id_token_signed_response_alg">ID Token Signed Alg</Label>
-                <Input id="id_token_signed_response_alg" value={editedProvider.id_token_signed_response_alg || ''} onChange={handleChange} />
+                <Label htmlFor="token_endpoint_auth_method">Token Endpoint Auth Method</Label>
+                <select
+                  id="token_endpoint_auth_method"
+                  value={editedProvider.token_endpoint_auth_method}
+                  onChange={(e) => setEditedProvider(prev => ({ ...prev, token_endpoint_auth_method: e.target.value }))}
+                  className="w-full p-2 border rounded"
+                >
+                  <option value="client_secret_post">client_secret_post</option>
+                  <option value="client_secret_basic">client_secret_basic</option>
+                  <option value="none">none</option>
+                </select>
               </div>
               <div>
-                <Label htmlFor="userinfo_signed_response_alg">Userinfo Signed Alg</Label>
-                <Input id="userinfo_signed_response_alg" value={editedProvider.userinfo_signed_response_alg || ''} onChange={handleChange} />
+                <Label htmlFor="signing_algorithm">ID Token Signed Alg</Label>
+                <Input id="signing_algorithm" value={editedProvider.signing_algorithm || ''} onChange={handleChange} />
               </div>
               <div>
-                <Label htmlFor="request_timeout">Request Timeout (ms)</Label>
-                <Input id="request_timeout" type="number" value={editedProvider.request_timeout || ''} onChange={handleChange} />
+                <Label htmlFor="profile_signing_algorithm">Userinfo Signed Alg</Label>
+                <Input id="profile_signing_algorithm" value={editedProvider.profile_signing_algorithm || ''} onChange={handleChange} />
+              </div>
+              <div>
+                <Label htmlFor="timeout">Request Timeout (ms)</Label>
+                <Input id="timeout" type="number" value={editedProvider.timeout || ''} onChange={handleChange} />
               </div>
             </div>
             <div className="text-sm text-muted-foreground mt-4">
-              <p>The Redirect URI for your OIDC provider should be: <code className="font-mono bg-gray-100 p-1 rounded">[Your App Base URL]/oidc-callback</code></p>
-              <p className="mt-1">Example: <code className="font-mono bg-gray-100 p-1 rounded">https://fit.domain.com/oidc-callback</code></p>
+              <p>The Redirect URI for your OIDC provider should be:  SPARKY_FITNESS_FRONTEND_URL/oidc-callback</p>
+              <div className="flex items-center">
+                <code className="font-mono bg-gray-100 p-1 rounded">{`${window.location.origin}/oidc-callback`}</code>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="ml-2 h-5 w-5"
+                  onClick={() => {
+                    navigator.clipboard.writeText(`${window.location.origin}/oidc-callback`);
+                    toast({ title: "Copied!", description: "Redirect URI copied to clipboard." });
+                  }}
+                >
+                  <ClipboardCopy className="h-4 w-4" />
+                </Button>
+              </div>
               <p className="mt-1">Ensure your OIDC provider allows localhost or your local IP for development.</p>
               <p className="mt-2">If using a proxy like Nginx Proxy Manager, ensure the following headers are configured:</p>
               <div className="relative group mt-2">

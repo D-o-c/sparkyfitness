@@ -62,13 +62,36 @@ export type GlycemicIndex = 'None' | 'Very Low' | 'Low' | 'Medium' | 'High' | 'V
 export interface FoodEntry {
   id: string;
   user_id: string;
-  food_id: string;
+  food_id?: string; // Make optional as it might be a meal_id
+  meal_id?: string; // New field for aggregated meals
   meal_type: string;
   quantity: number;
   unit: string;
   entry_date: string;
   variant_id?: string;
-  foods: Food; // The actual food item details
-  food_variants?: FoodVariant; // The specific variant details
   meal_plan_template_id?: string; // Optional: if this entry came from a meal plan
+
+  // Flattened food and variant details from the food_entries table
+  food_name: string;
+  brand_name?: string;
+  serving_size: number;
+  serving_unit: string;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  saturated_fat?: number;
+  polyunsaturated_fat?: number;
+  monounsaturated_fat?: number;
+  trans_fat?: number;
+  cholesterol?: number;
+  sodium?: number;
+  potassium?: number;
+  dietary_fiber?: number;
+  sugars?: number;
+  vitamin_a?: number;
+  vitamin_c?: number;
+  calcium?: number;
+  iron?: number;
+  glycemic_index?: GlycemicIndex;
 }

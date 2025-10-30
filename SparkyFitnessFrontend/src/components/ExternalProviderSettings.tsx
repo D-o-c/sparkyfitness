@@ -1,64 +1,111 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
-import { Plus, Trash2, Edit, Save, X, Database } from "lucide-react"; // Changed icon
+import { Database } from "lucide-react";
 import { apiCall } from '@/services/api';
+import { toggleProviderPublicSharing } from '@/services/externalProviderService';
 import { useAuth } from "@/hooks/useAuth";
 import { useToast } from "@/hooks/use-toast";
 import { usePreferences } from "@/contexts/PreferencesContext";
+import AddExternalProviderForm from "./AddExternalProviderForm";
+import ExternalProviderList from "./ExternalProviderList";
+import GarminConnectSettings from "./GarminConnectSettings";
 
-interface ExternalDataProvider { // Renamed interface
+export interface ExternalDataProvider {
   id: string;
   provider_name: string;
-  provider_type: 'openfoodfacts' | 'nutritionix' | 'fatsecret' | 'wger' | 'mealie' | 'free-exercise-db'; // Added free-exercise-db
-  app_id: string | null; // Keep app_id for other providers
+  provider_type: 'openfoodfacts' | 'nutritionix' | 'fatsecret' | 'wger' | 'mealie' | 'free-exercise-db' | 'withings' | 'garmin';
+  app_id: string | null;
   app_key: string | null;
   is_active: boolean;
-  base_url: string | null; // Add base_url field
+  base_url: string | null;
+  user_id?: string;
+  visibility: 'private' | 'public' | 'family';
+  shared_with_public?: boolean;
+  last_sync_at?: string; // Generic last sync for providers that don't have specific fields
+  sync_frequency?: 'hourly' | 'daily' | 'manual';
+  has_token?: boolean;
+  garmin_connect_status?: 'linked' | 'connected' | 'disconnected';
+  garmin_last_status_check?: string;
+  garmin_token_expires?: string;
+  withings_last_sync_at?: string;
+  withings_token_expires?: string;
 }
 
-const ExternalProviderSettings = () => { // Renamed component
+const ExternalProviderSettings = () => {
   const { user } = useAuth();
   const { toast } = useToast();
-  const { defaultFoodDataProviderId, setDefaultFoodDataProviderId } = usePreferences(); // Keep for now, will refactor later
+  const { defaultFoodDataProviderId, setDefaultFoodDataProviderId } = usePreferences();
   const [providers, setProviders] = useState<ExternalDataProvider[]>([]);
-  const [newProvider, setNewProvider] = useState({
-    provider_name: '',
-    provider_type: 'openfoodfacts' as 'openfoodfacts' | 'nutritionix' | 'fatsecret' | 'wger' | 'mealie' | 'free-exercise-db', // Added free-exercise-db
-    app_id: '',
-    app_key: '',
-    is_active: false,
-    base_url: '', // Initialize base_url
-  });
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
   const [editData, setEditData] = useState<Partial<ExternalDataProvider>>({});
   const [showAddForm, setShowAddForm] = useState(false);
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    if (user) {
-      loadProviders();
-    }
-  }, [user]);
-
-  const loadProviders = async () => {
+  const loadProviders = useCallback(async () => {
     if (!user) return;
 
     setLoading(true);
     try {
-      const data = await apiCall(`/external-providers/user/${user.id}`, { // Corrected API endpoint
+      const providersData = await apiCall('/external-providers', {
         method: 'GET',
         suppress404Toast: true,
       });
-      setProviders(data.map((provider: any) => ({
-        ...provider,
-        provider_type: provider.provider_type as 'openfoodfacts' | 'nutritionix' | 'fatsecret' | 'wger' | 'mealie' | 'free-exercise-db' // Added free-exercise-db
-      })) || []);
+
+      const updatedProviders = await Promise.all(providersData.map(async (provider: any) => {
+        if (provider.provider_type === 'garmin') {
+          try {
+            const garminStatus = await apiCall('/integrations/garmin/status');
+            return {
+              ...provider,
+              provider_type: provider.provider_type as ExternalDataProvider['provider_type'],
+              garmin_connect_status: garminStatus.isLinked ? 'linked' : 'disconnected',
+              garmin_last_status_check: garminStatus.lastUpdated,
+              garmin_token_expires: garminStatus.tokenExpiresAt,
+            };
+          } catch (garminError) {
+            console.error('Failed to fetch Garmin specific status for provider:', provider.id, garminError);
+            return {
+              ...provider,
+              provider_type: provider.provider_type as ExternalDataProvider['provider_type'],
+              garmin_connect_status: 'disconnected',
+            };
+          }
+        }
+        return {
+          ...provider,
+          provider_type: provider.provider_type as ExternalDataProvider['provider_type'],
+          garmin_connect_status: provider.garmin_connect_status || 'disconnected',
+        };
+      }));
+
+      const withingsProviders = updatedProviders.filter((p: ExternalDataProvider) => p.provider_type === 'withings' && p.has_token);
+      if (withingsProviders.length > 0) {
+        const withingsStatusPromises = withingsProviders.map(async (provider: ExternalDataProvider) => {
+          try {
+            const withingsStatus = await apiCall(`/withings/status`, {
+              method: 'GET',
+              params: { providerId: provider.id }
+            });
+            return {
+              ...provider,
+              withings_last_sync_at: withingsStatus.lastSyncAt,
+              withings_token_expires: withingsStatus.tokenExpiresAt,
+            };
+          } catch (withingsError) {
+            console.error('Failed to fetch Withings specific status for provider:', provider.id, withingsError);
+            return provider; // Return original provider if status fetch fails
+          }
+        });
+        const updatedWithingsProviders = await Promise.all(withingsStatusPromises);
+        const finalProviders = updatedProviders.map(p => {
+          const updatedProvider = updatedWithingsProviders.find(up => up.id === p.id);
+          return updatedProvider || p;
+        });
+        setProviders(finalProviders || []);
+      } else {
+        setProviders(updatedProviders || []);
+      }
     } catch (error: any) {
       console.error('Error loading external data providers:', error);
       toast({
@@ -69,94 +116,38 @@ const ExternalProviderSettings = () => { // Renamed component
     } finally {
       setLoading(false);
     }
-  };
+  }, [user, toast]);
 
-  const handleAddProvider = async () => {
-    if (!user || !newProvider.provider_name) {
-      toast({
-        title: "Error",
-        description: "Please fill in the provider name",
-        variant: "destructive"
-      });
-      return;
-    }
-
-    // Wger and OpenFoodFacts might not need app_id/app_key, so adjust validation
-    if (newProvider.provider_type === 'mealie') {
-      if (!newProvider.base_url || !newProvider.app_key) {
-        toast({
-          title: "Error",
-          description: `Please provide App URL and API Key for Mealie`,
-          variant: "destructive"
-        });
-        return;
-      }
-    } else if ((newProvider.provider_type === 'nutritionix' || newProvider.provider_type === 'fatsecret') && (!newProvider.app_id || !newProvider.app_key)) {
-      toast({
-        title: "Error",
-        description: `Please provide App ID and App Key for ${newProvider.provider_type}`,
-        variant: "destructive"
-      });
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const data = await apiCall('/external-providers', { // Corrected API endpoint
-        method: 'POST',
-        body: JSON.stringify({
-          user_id: user.id, // user_id will be handled by backend from JWT
-          provider_name: newProvider.provider_name,
-          provider_type: newProvider.provider_type,
-          app_id: (newProvider.provider_type === 'mealie' || newProvider.provider_type === 'free-exercise-db' || newProvider.provider_type === 'wger') ? null : newProvider.app_id || null, // Only set app_id for non-mealie, free-exercise-db, wger
-          app_key: newProvider.app_key || null,
-          is_active: newProvider.is_active,
-          base_url: (newProvider.provider_type === 'mealie' || newProvider.provider_type === 'free-exercise-db') ? newProvider.base_url || null : null, // Set base_url for mealie and free-exercise-db
-        }),
-      });
-
-      toast({
-        title: "Success",
-        description: "External data provider added successfully"
-      });
-      setNewProvider({
-        provider_name: '',
-        provider_type: 'openfoodfacts',
-        app_id: '',
-        app_key: '',
-        is_active: false,
-        base_url: '', // Reset base_url
-      });
-      setShowAddForm(false);
+  useEffect(() => {
+    if (user) {
       loadProviders();
-      if (data && data.is_active && (data.provider_type === 'openfoodfacts' || data.provider_type === 'nutritionix' || data.provider_type === 'fatsecret' || data.provider_type === 'mealie')) { // Only set default for food providers
-        setDefaultFoodDataProviderId(data.id);
-      }
-    } catch (error: any) {
-      console.error('Error adding external data provider:', error);
-      toast({
-        title: "Error",
-        description: `Failed to add external data provider: ${error.message}`,
-        variant: "destructive"
-      });
-    } finally {
-      setLoading(false);
     }
+  }, [user, loadProviders, setDefaultFoodDataProviderId]);
+
+  const handleAddProviderSuccess = () => {
+    setShowAddForm(false);
+    loadProviders();
   };
 
   const handleUpdateProvider = async (providerId: string) => {
     setLoading(true);
-    const providerUpdateData: Partial<ExternalDataProvider> = { // Renamed interface
+    const providerUpdateData: Partial<ExternalDataProvider> = {
       provider_name: editData.provider_name,
       provider_type: editData.provider_type,
-      app_id: (editData.provider_type === 'mealie' || editData.provider_type === 'free-exercise-db' || editData.provider_type === 'wger') ? null : editData.app_id || null, // Only set app_id for non-mealie, free-exercise-db, wger
+      app_id: (editData.provider_type === 'mealie' || editData.provider_type === 'free-exercise-db' || editData.provider_type === 'wger') ? null : editData.app_id || null,
       app_key: editData.app_key || null,
       is_active: editData.is_active,
-      base_url: (editData.provider_type === 'mealie' || editData.provider_type === 'free-exercise-db') ? editData.base_url || null : null, // Set base_url for mealie and free-exercise-db
+      base_url: (editData.provider_type === 'mealie' || editData.provider_type === 'free-exercise-db') ? editData.base_url || null : null,
+      sync_frequency: (editData.provider_type === 'withings' || editData.provider_type === 'garmin') ? editData.sync_frequency : null,
+      garmin_connect_status: editData.provider_type === 'garmin' ? editData.garmin_connect_status : null,
+      garmin_last_status_check: editData.provider_type === 'garmin' ? editData.garmin_last_status_check : null,
+      garmin_token_expires: editData.provider_type === 'garmin' ? editData.garmin_token_expires : null,
+      withings_last_sync_at: editData.provider_type === 'withings' ? editData.withings_last_sync_at : null,
+      withings_token_expires: editData.provider_type === 'withings' ? editData.withings_token_expires : null,
     };
 
     try {
-      const data = await apiCall(`/external-providers/${providerId}`, { // Corrected API endpoint
+      const data = await apiCall(`/external-providers/${providerId}`, {
         method: 'PUT',
         body: JSON.stringify(providerUpdateData),
       });
@@ -168,7 +159,7 @@ const ExternalProviderSettings = () => { // Renamed component
       setEditingProvider(null);
       setEditData({});
       loadProviders();
-      if (data && data.is_active && (data.provider_type === 'openfoodfacts' || data.provider_type === 'nutritionix' || data.provider_type === 'fatsecret' || data.provider_type === 'mealie')) { // Only set default for food providers
+      if (data && data.is_active && (data.provider_type === 'openfoodfacts' || data.provider_type === 'nutritionix' || data.provider_type === 'fatsecret' || data.provider_type === 'mealie')) {
         setDefaultFoodDataProviderId(data.id);
       } else if (data && defaultFoodDataProviderId === data.id) {
         setDefaultFoodDataProviderId(null);
@@ -186,11 +177,11 @@ const ExternalProviderSettings = () => { // Renamed component
   };
 
   const handleDeleteProvider = async (providerId: string) => {
-    if (!confirm('Are you sure you want to delete this external data provider?')) return; // Updated confirmation message
+    if (!confirm('Are you sure you want to delete this external data provider?')) return;
 
     setLoading(true);
     try {
-      await apiCall(`/external-providers/${providerId}`, { // Corrected API endpoint
+      await apiCall(`/external-providers/${providerId}`, {
         method: 'DELETE',
       });
 
@@ -217,17 +208,17 @@ const ExternalProviderSettings = () => { // Renamed component
   const handleToggleActive = async (providerId: string, isActive: boolean) => {
     setLoading(true);
     try {
-      const data = await apiCall(`/external-providers/${providerId}`, { // Corrected API endpoint
+      const data = await apiCall(`/external-providers/${providerId}`, {
         method: 'PUT',
         body: JSON.stringify({ is_active: isActive }),
       });
 
       toast({
         title: "Success",
-        description: `External data provider ${isActive ? 'activated' : 'deactivated'}` // Updated message
+        description: `External data provider ${isActive ? 'activated' : 'deactivated'}`
       });
       loadProviders();
-      if (data && data.is_active && (data.provider_type === 'openfoodfacts' || data.provider_type === 'nutritionix' || data.provider_type === 'fatsecret' || data.provider_type === 'mealie')) { // Only set default for food providers
+      if (data && data.is_active && (data.provider_type === 'openfoodfacts' || data.provider_type === 'nutritionix' || data.provider_type === 'fatsecret' || data.provider_type === 'mealie')) {
         setDefaultFoodDataProviderId(data.id);
       } else if (data && defaultFoodDataProviderId === data.id) {
         setDefaultFoodDataProviderId(null);
@@ -244,8 +235,172 @@ const ExternalProviderSettings = () => { // Renamed component
     }
   };
 
+  const handleConnectWithings = async (providerId: string) => {
+    setLoading(true);
+    try {
+      const response = await apiCall(`/api/withings/authorize`, {
+        method: 'GET',
+      });
+      if (response && response.authUrl) {
+        window.location.href = response.authUrl;
+      } else {
+        throw new Error('Failed to get Withings authorization URL.');
+      }
+    } catch (error: any) {
+      console.error('Error connecting to Withings:', error);
+      toast({
+        title: "Error",
+        description: `Failed to connect to Withings: ${error.message}`,
+        variant: "destructive"
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  const startEditing = (provider: ExternalDataProvider) => { // Renamed interface
+  const handleDisconnectWithings = async (providerId: string) => {
+    if (!confirm('Are you sure you want to disconnect from Withings? This will revoke access and delete all associated tokens.')) return;
+
+    setLoading(true);
+    try {
+      await apiCall(`/withings/disconnect`, {
+        method: 'POST',
+      });
+      toast({
+        title: "Success",
+        description: "Disconnected from Withings successfully."
+      });
+      loadProviders();
+    } catch (error: any) {
+      console.error('Error disconnecting from Withings:', error);
+      toast({
+        title: "Error",
+        description: `Failed to disconnect from Withings: ${error.message}`,
+        variant: "destructive"
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleManualSync = async (providerId: string) => {
+    setLoading(true);
+    try {
+      await apiCall(`/withings/sync`, {
+        method: 'POST',
+      });
+      toast({
+        title: "Success",
+        description: "Withings data synchronization initiated."
+      });
+      loadProviders();
+    } catch (error: any) {
+      console.error('Error initiating manual sync:', error);
+      toast({
+        title: "Error",
+        description: `Failed to initiate manual sync: ${error.message}`,
+        variant: "destructive"
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleConnectGarmin = async (providerId: string) => {
+    setLoading(true);
+    try {
+      // Placeholder for Garmin connection logic
+      // This would typically redirect to Garmin Connect for OAuth
+      toast({
+        title: "Info",
+        description: "Garmin connection flow initiated (placeholder)."
+      });
+      loadProviders(); // Reload to reflect potential status changes
+    } catch (error: any) {
+      console.error('Error connecting to Garmin:', error);
+      toast({
+        title: "Error",
+        description: `Failed to connect to Garmin: ${error.message}`,
+        variant: "destructive"
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDisconnectGarmin = async (providerId: string) => {
+    if (!confirm('Are you sure you want to disconnect from Garmin? This will revoke access and delete all associated tokens.')) return;
+
+    setLoading(true);
+    try {
+      // Call the Garmin unlink endpoint
+      await apiCall(`/integrations/garmin/unlink`, {
+        method: 'POST',
+      });
+      toast({
+        title: "Success",
+        description: "Disconnected from Garmin successfully."
+      });
+      loadProviders();
+    } catch (error: any) {
+      console.error('Error disconnecting from Garmin:', error);
+      toast({
+        title: "Error",
+        description: `Failed to disconnect from Garmin: ${error.message}`,
+        variant: "destructive"
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleManualSyncGarmin = async (providerId: string) => {
+    setLoading(true);
+    try {
+      const today = new Date();
+      const sevenDaysAgo = new Date(today);
+      sevenDaysAgo.setDate(today.getDate() - 7);
+
+      const startDate = sevenDaysAgo.toISOString().split('T')[0];
+      const endDate = today.toISOString().split('T')[0];
+
+      // Sync health and wellness data
+      await apiCall(`/integrations/garmin/sync/health_and_wellness`, {
+        method: 'POST',
+        body: JSON.stringify({
+          startDate,
+          endDate,
+          // metricTypes are now optional, the backend will fetch all available if not provided
+        }),
+      });
+
+      // Sync activities and workouts data
+      await apiCall(`/integrations/garmin/sync/activities_and_workouts`, {
+        method: 'POST',
+        body: JSON.stringify({
+          startDate,
+          endDate,
+          // activityType is optional, the backend will fetch all available if not provided
+        }),
+      });
+      toast({
+        title: "Success",
+        description: "Garmin data synchronization initiated."
+      });
+      loadProviders();
+    } catch (error: any) {
+      console.error('Error initiating manual Garmin sync:', error);
+      toast({
+        title: "Error",
+        description: `Failed to initiate manual Garmin sync: ${error.message}`,
+        variant: "destructive"
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const startEditing = (provider: ExternalDataProvider) => {
     setEditingProvider(provider.id);
     setEditData({
       provider_name: provider.provider_name,
@@ -253,7 +408,14 @@ const ExternalProviderSettings = () => { // Renamed component
       app_id: provider.app_id || '',
       app_key: provider.app_key || '',
       is_active: provider.is_active,
-      base_url: provider.base_url || '', // Set base_url
+      base_url: provider.base_url || '',
+      last_sync_at: provider.last_sync_at || null,
+      sync_frequency: provider.sync_frequency || 'manual',
+      garmin_connect_status: provider.garmin_connect_status || 'disconnected',
+      garmin_last_status_check: provider.garmin_last_status_check || '',
+      garmin_token_expires: provider.garmin_token_expires || '',
+      withings_last_sync_at: provider.withings_last_sync_at || '',
+      withings_token_expires: provider.withings_token_expires || '',
     });
   };
 
@@ -267,8 +429,10 @@ const ExternalProviderSettings = () => { // Renamed component
     { value: "nutritionix", label: "Nutritionix" },
     { value: "fatsecret", label: "FatSecret" },
     { value: "wger", label: "Wger (Exercise)" },
-    { value: "free-exercise-db", label: "Free Exercise DB" }, // Added Free Exercise DB
+    { value: "free-exercise-db", label: "Free Exercise DB" },
     { value: "mealie", label: "Mealie" },
+    { value: "withings", label: "Withings" },
+    { value: "garmin", label: "Garmin" },
   ];
 
   return (
@@ -276,318 +440,56 @@ const ExternalProviderSettings = () => { // Renamed component
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            <Database className="h-5 w-5" /> {/* Changed icon */}
-            Food & Exercise Data Providers
+            <Database className="h-5 w-5" />
+            External Data Providers
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {!showAddForm && (
-            <Button onClick={() => setShowAddForm(true)} variant="outline">
-              <Plus className="h-4 w-4 mr-2" />
-              Add New Data Provider {/* Changed button text */}
-            </Button>
-          )}
-
-          {showAddForm && (
-            <form onSubmit={(e) => { e.preventDefault(); handleAddProvider(); }} className="border rounded-lg p-4 space-y-4">
-              <h3 className="text-lg font-medium">Add New Data Provider</h3> {/* Changed title */}
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <Label htmlFor="new_provider_name">Provider Name</Label>
-                  <Input
-                    id="new_provider_name"
-                    value={newProvider.provider_name}
-                    onChange={(e) => setNewProvider(prev => ({ ...prev, provider_name: e.target.value }))}
-                    placeholder="My Provider name" // Fixed placeholder text
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="new_provider_type">Provider Type</Label>
-                  <Select
-                    value={newProvider.provider_type}
-                    onValueChange={(value) => setNewProvider(prev => ({ ...prev, provider_type: value as 'openfoodfacts' | 'nutritionix' | 'fatsecret' | 'wger' | 'mealie' | 'free-exercise-db', app_id: '', app_key: '', base_url: '' }))} // Added free-exercise-db, reset base_url
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {getProviderTypes().map(type => (
-                        <SelectItem key={type.value} value={type.value}>
-                          {type.label}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-
-              {newProvider.provider_type === 'mealie' && (
-                <>
-                  <div>
-                    <Label htmlFor="new_base_url">App URL</Label>
-                    <Input
-                      id="new_base_url"
-                      type="text"
-                      value={newProvider.base_url}
-                      onChange={(e) => setNewProvider(prev => ({ ...prev, base_url: e.target.value }))}
-                      placeholder="e.g., http://your-mealie-instance.com"
-                      autoComplete="off"
-                    />
-                  </div>
-                  <div>
-                    <Label htmlFor="new_app_key">API Key</Label>
-                    <Input
-                      id="new_app_key"
-                      type="password"
-                      value={newProvider.app_key}
-                      onChange={(e) => setNewProvider(prev => ({ ...prev, app_key: e.target.value }))}
-                      placeholder="Enter Mealie API Key"
-                      autoComplete="off"
-                    />
-                  </div>
-                </>
-              )}
-              {(newProvider.provider_type === 'nutritionix' || newProvider.provider_type === 'fatsecret') && (
-                <>
-                  <div>
-                    <Label htmlFor="new_app_id">App ID</Label>
-                    <Input
-                      id="new_app_id"
-                      type="text"
-                      value={newProvider.app_id}
-                      onChange={(e) => setNewProvider(prev => ({ ...prev, app_id: e.target.value }))}
-                      placeholder="Enter App ID"
-                      autoComplete="off"
-                    />
-                  </div>
-                  <div>
-                    <Label htmlFor="new_app_key">App Key</Label>
-                    <Input
-                      id="new_app_key"
-                      type="password"
-                      value={newProvider.app_key}
-                      onChange={(e) => setNewProvider(prev => ({ ...prev, app_key: e.target.value }))}
-                      placeholder="Enter App Key"
-                      autoComplete="off"
-                    />
-                  </div>
-                  {newProvider.provider_type === 'fatsecret' && (
-                    <p className="text-sm text-muted-foreground col-span-2">
-                      Note: For Fatsecret, you need to set up **your public IP** whitelisting in your Fatsecret developer account. This process can take up to 24 hours.
-                    </p>
-                  )}
-                </>
-              )}
-              {newProvider.provider_type === 'nutritionix' && (
-                <p className="text-sm text-muted-foreground col-span-2">
-                  Get your App ID and App Key from the <a href="https://developer.nutritionix.com/" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline">Nutritionix Developer Portal</a>.
-                </p>
-              )}
-              {newProvider.provider_type === 'fatsecret' && (
-                <p className="text-sm text-muted-foreground col-span-2">
-                  Get your App ID and App Key from the <a href="https://platform.fatsecret.com/my-account/dashboard" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline">Fatsecret Platform Dashboard</a>.
-                </p>
-              )}
-
-              <div className="flex items-center space-x-2">
-                <Switch
-                  id="new_is_active"
-                  checked={newProvider.is_active}
-                  onCheckedChange={(checked) => setNewProvider(prev => ({ ...prev, is_active: checked }))}
-                />
-                <Label htmlFor="new_is_active">Activate this provider</Label>
-              </div>
-
-              <div className="flex gap-2">
-                <Button type="submit" disabled={loading}>
-                  <Save className="h-4 w-4 mr-2" />
-                  Add Provider
-                </Button>
-                <Button type="button" variant="outline" onClick={() => setShowAddForm(false)}>
-                  <X className="h-4 w-4 mr-2" />
-                  Cancel
-                </Button>
-              </div>
-            </form>
-          )}
+          <AddExternalProviderForm
+            showAddForm={showAddForm}
+            setShowAddForm={setShowAddForm}
+            onAddSuccess={handleAddProviderSuccess}
+            loading={loading}
+            getProviderTypes={getProviderTypes}
+            handleConnectWithings={handleConnectWithings}
+            handleConnectGarmin={handleConnectGarmin}
+          />
 
           {providers.length > 0 && (
             <>
               <Separator />
-              <h3 className="text-lg font-medium">Configured Food & Exercise Data Providers</h3>
-              
-              <div className="space-y-4">
-                {providers.map((provider) => (
-                  <div key={provider.id} className="border rounded-lg p-4">
-                    {editingProvider === provider.id ? (
-                      // Edit Mode
-                      <form onSubmit={(e) => { e.preventDefault(); handleUpdateProvider(provider.id); }} className="space-y-4">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          <div>
-                            <Label>Provider Name</Label>
-                            <Input
-                              value={editData.provider_name || ''}
-                              onChange={(e) => setEditData(prev => ({ ...prev, provider_name: e.target.value }))}
-                            />
-                          </div>
-                          <div>
-                            <Label>Provider Type</Label>
-                            <Select
-                              value={editData.provider_type || ''}
-                              onValueChange={(value) => setEditData(prev => ({ ...prev, provider_type: value as 'openfoodfacts' | 'nutritionix' | 'fatsecret' | 'wger' | 'mealie' | 'free-exercise-db', app_id: '', app_key: '', base_url: '' }))} // Added free-exercise-db, reset base_url
-                            >
-                              <SelectTrigger>
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {getProviderTypes().map(type => (
-                                  <SelectItem key={type.value} value={type.value}>
-                                    {type.label}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        </div>
-                        {editData.provider_type === 'mealie' && (
-                          <>
-                            <div>
-                              <Label>App URL</Label>
-                              <Input
-                                type="text"
-                                value={editData.base_url || ''}
-                                onChange={(e) => setEditData(prev => ({ ...prev, base_url: e.target.value }))}
-                                placeholder="e.g., http://your-mealie-instance.com"
-                                autoComplete="off"
-                              />
-                            </div>
-                            <div>
-                              <Label>API Key</Label>
-                              <Input
-                                type="password"
-                                value={editData.app_key || ''}
-                                onChange={(e) => setEditData(prev => ({ ...prev, app_key: e.target.value }))}
-                                placeholder="Enter Mealie API Key"
-                                autoComplete="off"
-                              />
-                            </div>
-                          </>
-                        )}
-                        {(editData.provider_type === 'nutritionix' || editData.provider_type === 'fatsecret') && (
-                          <>
-                            <div>
-                              <Label>App ID</Label>
-                              <Input
-                                type="text"
-                                value={editData.app_id || ''}
-                                onChange={(e) => setEditData(prev => ({ ...prev, app_id: e.target.value }))}
-                                placeholder="Enter App ID"
-                                autoComplete="off"
-                              />
-                            </div>
-                            <div>
-                              <Label>App Key</Label>
-                              <Input
-                                type="password"
-                                value={editData.app_key || ''}
-                                onChange={(e) => setEditData(prev => ({ ...prev, app_key: e.target.value }))}
-                                placeholder="Enter App Key"
-                                autoComplete="off"
-                              />
-                            </div>
-                            {editData.provider_type === 'fatsecret' && (
-                              <p className="text-sm text-muted-foreground col-span-2">
-                                Note: For Fatsecret, you need to set up **your public IP** whitelisting in your Fatsecret developer account. This process can take up to 24 hours.
-                              </p>
-                            )}
-                          </>
-                        )}
-                        {editData.provider_type === 'nutritionix' && (
-                          <p className="text-sm text-muted-foreground col-span-2">
-                            Get your App ID and App Key from the <a href="https://developer.nutritionix.com/" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline">Nutritionix Developer Portal</a>.
-                          </p>
-                        )}
-                        {editData.provider_type === 'fatsecret' && (
-                          <p className="text-sm text-muted-foreground col-span-2">
-                            Get your App ID and App Key from the <a href="https://platform.fatsecret.com/my-account/dashboard" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline">Fatsecret Platform Dashboard</a>.
-                          </p>
-                        )}
-                        <div className="flex items-center space-x-2">
-                          <Switch
-                            checked={editData.is_active || false}
-                            onCheckedChange={(checked) => setEditData(prev => ({ ...prev, is_active: checked }))}
-                          />
-                          <Label>Activate this provider</Label>
-                        </div>
-                        <div className="flex gap-2">
-                          <Button type="submit" disabled={loading}>
-                            <Save className="h-4 w-4 mr-2" />
-                            Save Changes
-                          </Button>
-                          <Button type="button" variant="outline" onClick={cancelEditing}>
-                            <X className="h-4 w-4 mr-2" />
-                            Cancel
-                          </Button>
-                        </div>
-                      </form>
-                    ) : (
-                      // View Mode
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <h4 className="font-medium">{provider.provider_name}</h4>
-                            <p className="text-sm text-muted-foreground">
-                              {getProviderTypes().find(t => t.value === provider.provider_type)?.label || provider.provider_type}
-                              {provider.provider_type === 'mealie' && provider.base_url && ` - URL: ${provider.base_url}`}
-                              {(provider.provider_type !== 'mealie' && provider.provider_type !== 'free-exercise-db' && provider.provider_type !== 'wger') && provider.app_id && ` - App ID: ${provider.app_id.substring(0, 4)}...`}
-                              {(provider.provider_type === 'mealie' || provider.provider_type === 'nutritionix' || provider.provider_type === 'fatsecret') && provider.app_key && ` - App Key: ${provider.app_key.substring(0, 4)}...`}
-                            </p>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <Switch
-                              checked={provider.is_active}
-                              onCheckedChange={(checked) => handleToggleActive(provider.id, checked)}
-                              disabled={loading}
-                            />
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => startEditing(provider)}
-                            >
-                              <Edit className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => handleDeleteProvider(provider.id)}
-                              disabled={loading}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
+              <h3 className="text-lg font-medium">Configured External Data Providers</h3>
 
-              {providers.length === 0 && !showAddForm && (
-                <div className="text-center py-8 text-muted-foreground">
-                  <Database className="h-12 w-12 mx-auto mb-4 opacity-50" /> {/* Changed icon */}
-                  <p>No data providers configured yet.</p> {/* Changed message */}
-                  <p className="text-sm">Add your first data provider to enable search from external sources.</p> {/* Changed message */}
-                </div>
-              )}
+              <ExternalProviderList
+                providers={providers}
+                editingProvider={editingProvider}
+                editData={editData}
+                loading={loading}
+                user={user}
+                handleUpdateProvider={handleUpdateProvider}
+                setEditData={setEditData}
+                getProviderTypes={getProviderTypes}
+                handleToggleActive={handleToggleActive}
+                handleConnectWithings={handleConnectWithings}
+                handleManualSync={handleManualSync}
+                handleDisconnectWithings={handleDisconnectWithings}
+                handleManualSyncGarmin={handleManualSyncGarmin}
+                handleDisconnectGarmin={handleDisconnectGarmin}
+                startEditing={startEditing}
+                handleDeleteProvider={handleDeleteProvider}
+                toggleProviderPublicSharing={toggleProviderPublicSharing}
+                loadProviders={loadProviders}
+                toast={toast}
+                cancelEditing={cancelEditing}
+              />
             </>
           )}
 
           {providers.length === 0 && !showAddForm && (
             <div className="text-center py-8 text-muted-foreground">
-              <Database className="h-12 w-12 mx-auto mb-4 opacity-50" /> {/* Changed icon */}
-              <p>No data providers configured yet.</p> {/* Changed message */}
-              <p className="text-sm">Add your first data provider to enable search from external sources.</p> {/* Changed message */}
+              <Database className="h-12 w-12 mx-auto mb-4 opacity-50" />
+              <p>No data providers configured yet.</p>
+              <p className="text-sm">Add your first data provider to enable search from external sources.</p>
             </div>
           )}
         </CardContent>

@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
-import { Plus, Edit, Trash2, Share2, Lock, Repeat, Weight, Timer, ListOrdered } from "lucide-react"; // Added Repeat, Weight, Timer, ListOrdered
+import { Plus, Edit, Trash2, Share2, Lock, Repeat, Weight, Timer, ListOrdered, CalendarPlus } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
-import { usePreferences } from "@/contexts/PreferencesContext"; // Import usePreferences
+import { usePreferences } from "@/contexts/PreferencesContext";
 import { useAuth } from "@/hooks/useAuth";
 import { debug, info, warn, error } from '@/utils/logging';
 import {
@@ -11,33 +11,57 @@ import {
   updateWorkoutPreset,
   deleteWorkoutPreset,
 } from '@/services/workoutPresetService';
-import { WorkoutPreset } from '@/types/workout';
-import WorkoutPresetForm from "./WorkoutPresetForm"; // Import the new form component
+import { logWorkoutPreset } from '@/services/exerciseEntryService'; // Import logWorkoutPreset
+import { WorkoutPreset, PaginatedWorkoutPresets } from '@/types/workout';
+import WorkoutPresetForm from "./WorkoutPresetForm";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 interface WorkoutPresetsManagerProps {
-  onUsePreset: (preset: WorkoutPreset) => void;
+  // onUsePreset: (preset: WorkoutPreset) => void; // No longer needed
 }
 
-const WorkoutPresetsManager: React.FC<WorkoutPresetsManagerProps> = ({ }) => {
+const WorkoutPresetsManager: React.FC<WorkoutPresetsManagerProps> = () => { // Removed onUsePreset prop
   const { user } = useAuth();
-  const { loggingLevel } = usePreferences(); // Destructure loggingLevel
+  const { loggingLevel } = usePreferences();
   const [presets, setPresets] = useState<WorkoutPreset[]>([]);
   const [isAddPresetDialogOpen, setIsAddPresetDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
   const [selectedPreset, setSelectedPreset] = useState<WorkoutPreset | null>(null);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
-    if (user?.id) {
-      loadPresets();
+  const loadPresets = useCallback(async (loadMore = false) => {
+    // Access current 'loading' state via a ref or by ensuring it's not a dependency
+    // if it's only used for an early exit condition.
+    // For simplicity, we'll remove it from dependencies and rely on the closure.
+    if (!user?.id) return; // Only proceed if user is defined
+
+    // Prevent re-fetching if already loading
+    // This check needs to be outside the useCallback dependencies to avoid re-creating the function
+    // or use a ref for the loading state. For now, we'll assume 'loading' is managed correctly
+    // by the setLoading calls and the UI disables buttons.
+    // If 'loading' is truly needed in the dependency array for some other reason,
+    // a ref would be the correct pattern.
+    // For this specific case, the 'loading' check inside the function is sufficient
+    // and removing it from dependencies prevents the infinite loop.
+    
+    // If loading is true, exit early to prevent multiple simultaneous fetches
+    // This check relies on the 'loading' state from the component's closure, not from the dependency array.
+    if (loading) {
+      debug(loggingLevel, "WorkoutPresetsManager: Already loading presets, skipping fetch.");
+      return;
     }
-  }, [user?.id]);
 
-  const loadPresets = async () => {
-    if (!user?.id) return;
+    setLoading(true);
     try {
-      const fetchedPresets = await getWorkoutPresets();
-      setPresets(fetchedPresets);
+      const currentPage = loadMore ? page + 1 : 1;
+      const data: PaginatedWorkoutPresets = await getWorkoutPresets(currentPage, 10);
+      setPresets(prev => loadMore ? [...prev, ...data.presets] : data.presets);
+      setHasMore(data.presets.length > 0 && data.total > (currentPage * data.limit));
+      if (loadMore) {
+        setPage(currentPage);
+      }
     } catch (err) {
       error(loggingLevel, 'Error loading workout presets:', err);
       toast({
@@ -45,8 +69,16 @@ const WorkoutPresetsManager: React.FC<WorkoutPresetsManagerProps> = ({ }) => {
         description: "Failed to load workout presets.",
         variant: "destructive",
       });
+    } finally {
+      setLoading(false);
     }
-  };
+  }, [user?.id, page, loggingLevel]); // Removed 'loading' from dependencies
+
+  useEffect(() => {
+    if (user?.id) {
+      loadPresets();
+    }
+  }, [user?.id, loadPresets]);
 
   const handleCreatePreset = useCallback(async (newPresetData: Omit<WorkoutPreset, 'id' | 'user_id' | 'created_at' | 'updated_at'>) => {
     if (!user?.id) return;
@@ -114,6 +146,25 @@ const WorkoutPresetsManager: React.FC<WorkoutPresetsManagerProps> = ({ }) => {
     }
   }, [user?.id, loggingLevel, toast, loadPresets]);
 
+  const handleLogPresetToDiary = useCallback(async (preset: WorkoutPreset) => {
+    if (!user?.id) return;
+    try {
+      const today = new Date().toISOString().split('T')[0]; // Get current date in YYYY-MM-DD format
+      await logWorkoutPreset(preset.id, today);
+      toast({
+        title: "Success",
+        description: `Workout preset "${preset.name}" logged to diary.`,
+      });
+    } catch (err) {
+      error(loggingLevel, 'Error logging workout preset to diary:', err);
+      toast({
+        title: "Error",
+        description: `Failed to log workout preset "${preset.name}" to diary.`,
+        variant: "destructive",
+      });
+    }
+  }, [user?.id, loggingLevel, toast]);
+
   return (
     <>
       <div className="flex flex-row items-center justify-end space-y-0 pb-2">
@@ -148,24 +199,12 @@ const WorkoutPresetsManager: React.FC<WorkoutPresetsManagerProps> = ({ }) => {
                 <TooltipProvider>
                   <Tooltip>
                     <TooltipTrigger asChild>
-                      <Button variant="ghost" size="icon" onClick={() => { setSelectedPreset(preset); setIsEditDialogOpen(true); }}>
-                        <Edit className="h-4 w-4" />
+                      <Button variant="ghost" size="icon" onClick={() => handleLogPresetToDiary(preset)}>
+                        <CalendarPlus className="h-4 w-4" />
                       </Button>
                     </TooltipTrigger>
                     <TooltipContent>
-                      <p>Edit this preset</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button variant="ghost" size="icon" onClick={() => handleDeletePreset(preset.id)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      <p>Delete this preset</p>
+                      <p>Log preset to diary</p>
                     </TooltipContent>
                   </Tooltip>
                 </TooltipProvider>
@@ -192,9 +231,40 @@ const WorkoutPresetsManager: React.FC<WorkoutPresetsManagerProps> = ({ }) => {
                     </Tooltip>
                   </TooltipProvider>
                 )}
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button variant="ghost" size="icon" onClick={() => { setSelectedPreset(preset); setIsEditDialogOpen(true); }}>
+                        <Edit className="h-4 w-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Edit this preset</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button variant="ghost" size="icon" onClick={() => handleDeletePreset(preset.id)}>
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      <p>Delete this preset</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
               </div>
             </div>
           ))}
+        </div>
+      )}
+      {hasMore && (
+        <div className="flex justify-center">
+          <Button onClick={() => loadPresets(true)} disabled={loading}>
+            {loading ? 'Loading...' : 'Load More'}
+          </Button>
         </div>
       )}
 

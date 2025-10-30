@@ -1,9 +1,9 @@
-const { getPool } = require('../db/poolManager');
+const { getClient } = require('../db/poolManager');
 const { log } = require('../config/logging');
 const format = require('pg-format');
 
 async function createWorkoutPreset(presetData) {
-  const client = await getPool().connect();
+  const client = await getClient(presetData.user_id); // User-specific operation
   try {
     await client.query('BEGIN');
 
@@ -38,7 +38,7 @@ async function createWorkoutPreset(presetData) {
 
     await client.query('COMMIT');
     // Refetch the created preset to get the full nested structure
-    return getWorkoutPresetById(newPreset.id);
+    return getWorkoutPresetById(newPreset.id, presetData.user_id);
   } catch (error) {
     await client.query('ROLLBACK');
     log('error', `Error creating workout preset:`, error);
@@ -48,9 +48,17 @@ async function createWorkoutPreset(presetData) {
   }
 }
 
-async function getWorkoutPresets(userId) {
-  const client = await getPool().connect();
+async function getWorkoutPresets(userId, page = 1, limit = 10) {
+  const client = await getClient(userId); // User-specific operation
   try {
+    const offset = (page - 1) * limit;
+
+    const totalResult = await client.query(
+      `SELECT COUNT(*) FROM workout_presets WHERE is_public = TRUE OR user_id = $1`,
+      [userId]
+    );
+    const total = parseInt(totalResult.rows[0].count, 10);
+
     const result = await client.query(
       `SELECT
          wp.id, wp.user_id, wp.name, wp.description, wp.is_public, wp.created_at, wp.updated_at,
@@ -79,19 +87,25 @@ async function getWorkoutPresets(userId) {
            ), '[]'::json
          ) AS exercises
        FROM workout_presets wp
-       WHERE wp.user_id = $1 OR wp.is_public = TRUE
+       WHERE wp.is_public = TRUE OR wp.user_id = $1
        GROUP BY wp.id
-       ORDER BY wp.name ASC`,
-      [userId]
+       ORDER BY wp.name ASC
+       LIMIT $2 OFFSET $3`,
+      [userId, limit, offset]
     );
-    return result.rows;
+    return {
+      presets: result.rows,
+      total,
+      page,
+      limit
+    };
   } finally {
     client.release();
   }
 }
 
-async function getWorkoutPresetById(presetId) {
-  const client = await getPool().connect();
+async function getWorkoutPresetById(presetId, userId) {
+  const client = await getClient(userId); // User-specific operation (RLS will handle access)
   try {
     const result = await client.query(
       `SELECT
@@ -132,14 +146,11 @@ async function getWorkoutPresetById(presetId) {
 }
 
 async function updateWorkoutPreset(presetId, userId, updateData) {
-  const client = await getPool().connect();
+  const client = await getClient(userId); // User-specific operation
   try {
     await client.query('BEGIN');
 
     const presetCheck = await client.query('SELECT user_id FROM workout_presets WHERE id = $1', [presetId]);
-    if (presetCheck.rows.length === 0 || presetCheck.rows[0].user_id !== userId) {
-      throw new Error('Preset not found or user does not have permission to update it.');
-    }
 
     const result = await client.query(
       `UPDATE workout_presets SET
@@ -147,9 +158,9 @@ async function updateWorkoutPreset(presetId, userId, updateData) {
         description = COALESCE($2, description),
         is_public = COALESCE($3, is_public),
         updated_at = now()
-       WHERE id = $4 AND user_id = $5
+       WHERE id = $4
        RETURNING id`,
-      [updateData.name, updateData.description, updateData.is_public, presetId, userId]
+      [updateData.name, updateData.description, updateData.is_public, presetId]
     );
 
     if (result.rows.length > 0 && updateData.exercises !== undefined) {
@@ -182,7 +193,7 @@ async function updateWorkoutPreset(presetId, userId, updateData) {
 
     await client.query('COMMIT');
     // Refetch the updated preset to get the full nested structure
-    return getWorkoutPresetById(presetId);
+    return getWorkoutPresetById(presetId, userId);
   } catch (error) {
     await client.query('ROLLBACK');
     log('error', `Error updating workout preset ${presetId}:`, error);
@@ -193,12 +204,12 @@ async function updateWorkoutPreset(presetId, userId, updateData) {
 }
 
 async function deleteWorkoutPreset(presetId, userId) {
-  const client = await getPool().connect();
+  const client = await getClient(userId); // User-specific operation
   try {
     await client.query('BEGIN');
     const result = await client.query(
-      'DELETE FROM workout_presets WHERE id = $1 AND user_id = $2 RETURNING id',
-      [presetId, userId]
+      'DELETE FROM workout_presets WHERE id = $1 RETURNING id',
+      [presetId]
     );
     await client.query('COMMIT');
     return result.rowCount > 0;
@@ -211,8 +222,8 @@ async function deleteWorkoutPreset(presetId, userId) {
   }
 }
 
-async function getWorkoutPresetOwnerId(presetId) {
-  const client = await getPool().connect();
+async function getWorkoutPresetOwnerId(userId, presetId) {
+  const client = await getClient(userId); // User-specific operation (RLS will handle access)
   try {
     const result = await client.query(
       'SELECT user_id FROM workout_presets WHERE id = $1',
@@ -225,7 +236,7 @@ async function getWorkoutPresetOwnerId(presetId) {
 }
 
 async function searchWorkoutPresets(searchTerm, userId, limit = null) {
-  const client = await getPool().connect();
+  const client = await getClient(userId); // User-specific operation
   try {
     let query = `
       SELECT
@@ -255,14 +266,14 @@ async function searchWorkoutPresets(searchTerm, userId, limit = null) {
           ), '[]'::json
         ) AS exercises
       FROM workout_presets wp
-      WHERE (wp.user_id = $1 OR wp.is_public = TRUE)
-      AND wp.name ILIKE $2
+      WHERE wp.is_public = TRUE
+      AND wp.name ILIKE $1
       GROUP BY wp.id
       ORDER BY wp.name ASC`;
-    const queryParams = [userId, `%${searchTerm}%`];
+    const queryParams = [`%${searchTerm}%`];
 
     if (limit !== null) {
-      query += ` LIMIT $3`;
+      query += ` LIMIT $2`;
       queryParams.push(limit);
     }
 
